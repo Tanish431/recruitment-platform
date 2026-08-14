@@ -1,0 +1,32 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, coverage, and profiling output
+*.test
+cover.out
+*.coverprofile
+
+# Go workspace file
+workspaces/
+
+# Build artifacts
+build/
+out/
+
+# Dependency directories
+vendor/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+
+secrets/

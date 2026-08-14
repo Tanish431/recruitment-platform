@@ -1,0 +1,9 @@
+DROP TYPE IF EXISTS team_side;
+DROP TYPE IF EXISTS attendance_status;
+DROP TYPE IF EXISTS eval_status;
+DROP TYPE IF EXISTS resolution_type;
+DROP TYPE IF EXISTS query_status;
+DROP TYPE IF EXISTS assignment_status;
+DROP TYPE IF EXISTS round_result;
+DROP TYPE IF EXISTS user_role;
+DROP EXTENSION IF EXISTS "uuid-ossp";
