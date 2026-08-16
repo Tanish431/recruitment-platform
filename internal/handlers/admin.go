@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Tanish431/recruitment-platform/internal/auth"
+	appmiddleware "github.com/Tanish431/recruitment-platform/internal/middleware"
 	"github.com/Tanish431/recruitment-platform/internal/sheets"
 )
 
@@ -42,6 +43,12 @@ type createSlotRequest struct {
 }
 
 func (h *AdminHandler) CreateSlot(w http.ResponseWriter, r *http.Request) {
+	uid, ok := r.Context().Value(appmiddleware.UserIDKey).(int64)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req createSlotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -59,15 +66,13 @@ func (h *AdminHandler) CreateSlot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := h.Pool.QueryRow(r.Context(), `
-		INSERT INTO slots (round_id, location_id, start_time, duration_min, capacity)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO slots (round_id, location_id, start_time, duration_min, capacity, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id
-	`, req.RoundID, req.LocationID, startTime, req.DurationMin, req.Capacity)
+	`, req.RoundID, req.LocationID, startTime, req.DurationMin, req.Capacity, uid)
 
 	var id int64
 	if err := row.Scan(&id); err != nil {
-		// unique constraint violation = someone already has a slot at this
-		// exact (round, location, start_time)
 		http.Error(w, "failed to create slot (possibly a duplicate location+time): "+err.Error(), http.StatusConflict)
 		return
 	}
@@ -85,14 +90,15 @@ func (h *AdminHandler) ListSlots(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.Pool.Query(r.Context(), `
 		SELECT s.id, s.location_id, l.name, s.start_time, s.duration_min,
-		       s.capacity, s.filled_count
+		       s.capacity, s.filled_count, s.created_by, COALESCE(u.name, u.campus_email, '')
 		FROM slots s
+		LEFT JOIN users u ON u.id = s.created_by
 		JOIN locations l ON l.id = s.location_id
 		WHERE s.round_id = $1
 		ORDER BY s.start_time
 	`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -105,13 +111,15 @@ func (h *AdminHandler) ListSlots(w http.ResponseWriter, r *http.Request) {
 		DurationMin  int       `json:"duration_min"`
 		Capacity     int       `json:"capacity"`
 		FilledCount  int       `json:"filled_count"`
+		HostedByID   *int64    `json:"hosted_by_id"`
+		HostedByName string    `json:"hosted_by_name"`
 	}
 
 	slots := []slotView{}
 	for rows.Next() {
 		var s slotView
 		if err := rows.Scan(&s.ID, &s.LocationID, &s.LocationName, &s.StartTime,
-			&s.DurationMin, &s.Capacity, &s.FilledCount); err != nil {
+			&s.DurationMin, &s.Capacity, &s.FilledCount, &s.HostedByID, &s.HostedByName); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}
@@ -189,7 +197,7 @@ func (h *AdminHandler) ListJudgeStations(w http.ResponseWriter, r *http.Request)
 		ORDER BY l.name
 	`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -331,7 +339,7 @@ func (h *AdminHandler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 		ORDER BY s.start_time
 	`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -793,7 +801,7 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 		ORDER BY u.campus_email
 	`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -822,7 +830,7 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 func (h *AdminHandler) ListRounds(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.Pool.Query(r.Context(), `SELECT id, number, name, slot_creation_open, is_active FROM rounds ORDER BY number`)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -854,7 +862,7 @@ func (h *AdminHandler) ListLocations(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.Pool.Query(r.Context(), `SELECT id, name FROM locations WHERE round_id = $1 ORDER BY name`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -1040,7 +1048,7 @@ func (h *AdminHandler) ListUnassignedCandidates(w http.ResponseWriter, r *http.R
 
 	rows, err := h.Pool.Query(r.Context(), query, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -1199,7 +1207,7 @@ func (h *AdminHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.Pool.Query(r.Context(), query, args...)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -1382,6 +1390,52 @@ func (h *AdminHandler) UpdateSlotLocation(w http.ResponseWriter, r *http.Request
 	}
 	if tag.RowsAffected() == 0 {
 		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type reassignJudgeRequest struct {
+	OldJudgeID int64 `json:"old_judge_id"`
+	NewJudgeID int64 `json:"new_judge_id"`
+}
+
+func (h *AdminHandler) ReassignSlotJudge(w http.ResponseWriter, r *http.Request) {
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	var req reassignJudgeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	var hostID int64
+	if err := h.Pool.QueryRow(ctx, `SELECT created_by FROM slots WHERE id = $1`, slotID).Scan(&hostID); err != nil {
+		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+
+	if hostID == req.OldJudgeID {
+		_, err = h.Pool.Exec(ctx, `UPDATE slots SET created_by = $1 WHERE id = $2`, req.NewJudgeID, slotID)
+		if err == nil {
+			_, err = h.Pool.Exec(ctx, `
+				UPDATE slot_co_judges SET host_marked_present = false, co_judge_marked_host_present = false
+				WHERE slot_id = $1
+			`, slotID)
+		}
+	} else {
+		_, err = h.Pool.Exec(ctx, `
+			UPDATE slot_co_judges
+			SET judge_id = $1, host_marked_present = false, co_judge_marked_host_present = false
+			WHERE slot_id = $2 AND judge_id = $3
+		`, req.NewJudgeID, slotID, req.OldJudgeID)
+	}
+	if err != nil {
+		http.Error(w, "reassign failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

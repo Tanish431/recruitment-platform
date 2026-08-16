@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,6 +24,13 @@ type Round2Handler struct {
 
 func NewRound2Handler(pool *pgxpool.Pool, sheetsClient *sheets.Client) *Round2Handler {
 	return &Round2Handler{Pool: pool, Sheets: sheetsClient}
+}
+
+func maxCoJudges(roundNumber int16) int {
+	if roundNumber == 3 {
+		return 2
+	}
+	return 1
 }
 
 // AvailableSlots lists open (location, time) combos a judge can still claim
@@ -55,7 +63,7 @@ func (h *Round2Handler) AvailableSlots(w http.ResponseWriter, r *http.Request) {
 		ORDER BY s.start_time
 	`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -97,21 +105,35 @@ func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-
 	var req claimSlotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 	if req.DurationMin < 1 {
-		req.DurationMin = 75 // default to 1hr15 per the debate format
+		req.DurationMin = 75
 	}
-	if blockIfRoundInactive(r.Context(), h.Pool, w, r, req.RoundID) { // or roundID, matching whichever var name is local
+
+	ctx := r.Context()
+	var exists bool
+	if err := h.Pool.QueryRow(ctx, `SELECT true FROM rounds WHERE id = $1`, req.RoundID).Scan(&exists); err != nil {
+		http.Error(w, "round not found", http.StatusNotFound)
 		return
 	}
-	var exists bool
-	if err := h.Pool.QueryRow(r.Context(), `SELECT true FROM rounds WHERE id = $1`, req.RoundID).Scan(&exists); err != nil {
-		http.Error(w, "round not found", http.StatusNotFound)
+
+	// Slot creation cap: only (eligible candidates / 12) slots can exist at
+	// once — forces judges to double up on existing slots as co-judges
+	// rather than everyone spinning up their own near-empty debate.
+	var eligibleCount int
+	h.Pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE role = 'candidate' AND round1_result = 'advanced'`).Scan(&eligibleCount)
+	maxSlots := eligibleCount / 12
+	if maxSlots < 1 {
+		maxSlots = 1
+	}
+	var currentSlots int
+	h.Pool.QueryRow(ctx, `SELECT count(*) FROM slots WHERE round_id = $1 AND created_by IS NOT NULL`, req.RoundID).Scan(&currentSlots)
+	if currentSlots >= maxSlots {
+		http.Error(w, "slot creation limit reached — join an existing open slot as co-judge instead", http.StatusConflict)
 		return
 	}
 
@@ -121,7 +143,7 @@ func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row := h.Pool.QueryRow(r.Context(), `
+	row := h.Pool.QueryRow(ctx, `
 		INSERT INTO slots (round_id, location_id, start_time, duration_min, capacity, created_by, claimed_at)
 		VALUES ($1, $2, $3, $4, 6, $5, now())
 		RETURNING id
@@ -129,13 +151,266 @@ func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 
 	var id int64
 	if err := row.Scan(&id); err != nil {
-		// unique constraint fires here - someone else claimed this exact
-		// (location, time) first. This IS the FCFS mechanism.
 		http.Error(w, "slot already claimed by another judge", http.StatusConflict)
 		return
 	}
-
 	json.NewEncoder(w).Encode(map[string]int64{"id": id})
+}
+
+// OpenSlotsToJoin lists slots that have a host but no co-judge yet — what
+// a judge sees when deciding to join rather than create.
+func (h *Round2Handler) OpenSlotsToJoin(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	roundID, err := strconv.ParseInt(r.URL.Query().Get("round_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "round_id required", http.StatusBadRequest)
+		return
+	}
+
+	var roundNumber int16
+	h.Pool.QueryRow(r.Context(), `SELECT number FROM rounds WHERE id = $1`, roundID).Scan(&roundNumber)
+	cap := maxCoJudges(roundNumber)
+
+	rows, err := h.Pool.Query(r.Context(), `
+		SELECT s.id, l.name, s.start_time, COALESCE(hu.name, hu.campus_email, ''),
+		       (SELECT count(*) FROM slot_co_judges cj WHERE cj.slot_id = s.id)
+		FROM slots s
+		JOIN locations l ON l.id = s.location_id
+		JOIN users hu ON hu.id = s.created_by
+		WHERE s.round_id = $1 AND s.created_by IS NOT NULL AND s.created_by != $2
+		AND (SELECT count(*) FROM slot_co_judges cj WHERE cj.slot_id = s.id) < $3
+		ORDER BY s.start_time
+	`, roundID, uid, cap)
+	if err != nil {
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type openView struct {
+		ID           int64     `json:"id"`
+		Location     string    `json:"location_name"`
+		Start        time.Time `json:"start_time"`
+		HostName     string    `json:"host_name"`
+		JudgesJoined int       `json:"judges_joined"`
+		JudgesNeeded int       `json:"judges_needed"`
+	}
+	results := []openView{}
+	for rows.Next() {
+		var v openView
+		if err := rows.Scan(&v.ID, &v.Location, &v.Start, &v.HostName, &v.JudgesJoined); err != nil {
+			http.Error(w, "scan failed", http.StatusInternalServerError)
+			return
+		}
+		v.JudgesNeeded = cap
+		results = append(results, v)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+// JoinSlot lets a judge become the co-judge on someone else's claimed slot.
+func (h *Round2Handler) JoinSlot(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	var hostID int64
+	var roundID int64
+	if err := h.Pool.QueryRow(ctx, `SELECT created_by, round_id FROM slots WHERE id = $1`, slotID).Scan(&hostID, &roundID); err != nil {
+		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+	if hostID == uid {
+		http.Error(w, "you already host this slot", http.StatusBadRequest)
+		return
+	}
+
+	var roundNumber int16
+	h.Pool.QueryRow(ctx, `SELECT number FROM rounds WHERE id = $1`, roundID).Scan(&roundNumber)
+	cap := maxCoJudges(roundNumber)
+
+	var coJudgeCount int
+	h.Pool.QueryRow(ctx, `SELECT count(*) FROM slot_co_judges WHERE slot_id = $1`, slotID).Scan(&coJudgeCount)
+	if coJudgeCount >= cap {
+		http.Error(w, "this slot already has enough co-judges", http.StatusConflict)
+		return
+	}
+
+	if _, err := h.Pool.Exec(ctx, `INSERT INTO slot_co_judges (slot_id, judge_id) VALUES ($1, $2)`, slotID, uid); err != nil {
+		http.Error(w, "failed to join: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type coJudgeStatusView struct {
+	SlotID                   int64   `json:"slot_id"`
+	HostID                   int64   `json:"host_id"`
+	HostName                 string  `json:"host_name"`
+	CoJudgeID                *int64  `json:"co_judge_id,omitempty"`
+	CoJudgeName              *string `json:"co_judge_name,omitempty"`
+	HostMarkedCoJudgePresent bool    `json:"host_marked_co_judge_present"`
+	CoJudgeMarkedHostPresent bool    `json:"co_judge_marked_host_present"`
+	YouAreHost               bool    `json:"you_are_host"`
+	YouAreCoJudge            bool    `json:"you_are_co_judge"`
+	ScoringUnlocked          bool    `json:"scoring_unlocked"`
+	TeamAPrep                string  `json:"team_a_prep"`
+	TeamBPrep                string  `json:"team_b_prep"`
+}
+
+// SlotCoJudgeStatus is the combined view a judge's UI polls to know who's
+// hosting/co-judging and whether scoring is unlocked yet.
+func (h *Round2Handler) SlotCoJudgeStatus(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+
+	var v coJudgeStatusView
+	err = h.Pool.QueryRow(r.Context(), `
+		SELECT s.id, s.created_by, COALESCE(hu.name, hu.campus_email, ''),
+		       cj.judge_id, cu.name, cu.campus_email,
+		       COALESCE(cj.host_marked_present, false), COALESCE(cj.co_judge_marked_host_present, false),
+		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, '')
+		FROM slots s
+		JOIN users hu ON hu.id = s.created_by
+		LEFT JOIN slot_co_judges cj ON cj.slot_id = s.id
+		LEFT JOIN users cu ON cu.id = cj.judge_id
+		WHERE s.id = $1
+	`, slotID).Scan(&v.SlotID, &v.HostID, &v.HostName, &v.CoJudgeID, new(sql.NullString), new(sql.NullString),
+		&v.HostMarkedCoJudgePresent, &v.CoJudgeMarkedHostPresent, &v.TeamAPrep, &v.TeamBPrep)
+	if err != nil {
+		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+
+	// re-query co-judge name cleanly (nullable name/email combo needs its own scan)
+	if v.CoJudgeID != nil {
+		var name string
+		h.Pool.QueryRow(r.Context(), `SELECT COALESCE(name, campus_email, '') FROM users WHERE id = $1`, *v.CoJudgeID).Scan(&name)
+		v.CoJudgeName = &name
+	}
+
+	v.YouAreHost = v.HostID == uid
+	v.YouAreCoJudge = v.CoJudgeID != nil && *v.CoJudgeID == uid
+	v.ScoringUnlocked = v.CoJudgeID != nil && v.HostMarkedCoJudgePresent && v.CoJudgeMarkedHostPresent
+
+	json.NewEncoder(w).Encode(v)
+}
+
+// MarkCoJudgePresent: host confirms the co-judge showed up.
+func (h *Round2Handler) MarkCoJudgePresent(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	var hostID int64
+	h.Pool.QueryRow(r.Context(), `SELECT created_by FROM slots WHERE id = $1`, slotID).Scan(&hostID)
+	if hostID != uid {
+		http.Error(w, "only the host can mark the co-judge present", http.StatusForbidden)
+		return
+	}
+	tag, err := h.Pool.Exec(r.Context(), `UPDATE slot_co_judges SET host_marked_present = true WHERE slot_id = $1`, slotID)
+	if err != nil || tag.RowsAffected() == 0 {
+		http.Error(w, "no co-judge has joined this slot yet", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// MarkHostPresent: the co-judge confirms the host showed up.
+func (h *Round2Handler) MarkHostPresent(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	tag, err := h.Pool.Exec(r.Context(), `
+		UPDATE slot_co_judges SET co_judge_marked_host_present = true WHERE slot_id = $1 AND judge_id = $2
+	`, slotID, uid)
+	if err != nil || tag.RowsAffected() == 0 {
+		http.Error(w, "you are not the co-judge for this slot", http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type prepRequest struct {
+	Team string `json:"team"` // "A" | "B"
+	Text string `json:"text"`
+}
+
+// SetTeamPrep: host-only, records pre-debate prep notes per team.
+func (h *Round2Handler) SetTeamPrep(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	var req prepRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Team != "A" && req.Team != "B") {
+		http.Error(w, "team must be A or B", http.StatusBadRequest)
+		return
+	}
+	col := "team_a_prep"
+	if req.Team == "B" {
+		col = "team_b_prep"
+	}
+	// safe: col is one of two hardcoded literals above, never derived from request input
+	query := fmt.Sprintf(`UPDATE slots SET %s = $1 WHERE id = $2 AND created_by = $3`, col)
+	tag, err := h.Pool.Exec(r.Context(), query, req.Text, slotID, uid)
+	if err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		http.Error(w, "not your slot", http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Round2Handler) coJudgeConfirmed(ctx context.Context, slotID int64) bool {
+	var total, confirmed int
+	h.Pool.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE host_marked_present AND co_judge_marked_host_present)
+		FROM slot_co_judges WHERE slot_id = $1
+	`, slotID).Scan(&total, &confirmed)
+	return total >= 1 && total == confirmed
 }
 
 // Participants lists the 6 candidates in a slot the judge is hosting,
@@ -170,7 +445,7 @@ func (h *Round2Handler) Participants(w http.ResponseWriter, r *http.Request) {
 		ORDER BY dp.team, u.campus_email
 	`, slotID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -260,6 +535,13 @@ func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		http.Error(w, "invalid participant id", http.StatusBadRequest)
+		return
+	}
+
+	var slotID int64
+	h.Pool.QueryRow(r.Context(), `SELECT slot_id FROM debate_participants WHERE id = $1`, id).Scan(&slotID)
+	if !h.coJudgeConfirmed(r.Context(), slotID) {
+		http.Error(w, "confirm co-judge attendance before entering scores", http.StatusForbidden)
 		return
 	}
 
@@ -384,7 +666,7 @@ func (h *Round2Handler) MyClaimedSlots(w http.ResponseWriter, r *http.Request) {
 		ORDER BY s.start_time DESC
 	`, roundID, uid)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()

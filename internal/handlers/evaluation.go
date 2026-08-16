@@ -126,9 +126,21 @@ func (h *EvaluationHandler) Claim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var roundNumber int16
+	var role string
+	h.Pool.QueryRow(r.Context(), `
+		SELECT ro.number FROM evaluations e JOIN slots s ON s.id = e.slot_id JOIN rounds ro ON ro.id = s.round_id WHERE e.id = $1
+	`, id).Scan(&roundNumber)
+
+	role, _ = r.Context().Value(appmiddleware.UserRoleKey).(string)
+
+	if roundNumber == 3 && role != "admin" {
+		http.Error(w, "only admin scores in round 3 — judges are present as bias-check observers only", http.StatusForbidden)
+		return
+	}
+
 	tag, err := h.Pool.Exec(r.Context(), `
-		UPDATE evaluations
-		SET status = 'in_progress', judge_id = $1, started_at = now()
+		UPDATE evaluations SET status = 'in_progress', judge_id = $1, started_at = now()
 		WHERE id = $2 AND status = 'checked_in'
 	`, uid, id)
 	if err != nil {
@@ -139,7 +151,6 @@ func (h *EvaluationHandler) Claim(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "candidate already claimed by another judge", http.StatusConflict)
 		return
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -349,7 +360,7 @@ func (h *EvaluationHandler) LookupByEmail(w http.ResponseWriter, r *http.Request
 			http.Error(w, "no evaluation found for this candidate in this round", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

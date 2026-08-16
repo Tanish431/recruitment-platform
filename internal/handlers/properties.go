@@ -37,7 +37,7 @@ func (h *PropertyHandler) ListProperties(w http.ResponseWriter, r *http.Request)
 		ORDER BY position, id
 	`, roundID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -144,7 +144,7 @@ func (h *PropertyHandler) EvaluationRatings(w http.ResponseWriter, r *http.Reque
 		SELECT property_id, rating::text FROM evaluation_property_ratings WHERE evaluation_id = $1
 	`, evaluationID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -197,7 +197,7 @@ func (h *PropertyHandler) ParticipantRatings(w http.ResponseWriter, r *http.Requ
 		SELECT property_id, rating::text FROM participant_property_ratings WHERE participant_id = $1
 	`, participantID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()

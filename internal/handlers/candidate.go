@@ -252,7 +252,7 @@ func (h *CandidateHandler) MyUnavailability(w http.ResponseWriter, r *http.Reque
 		ORDER BY ro.number
 	`, uid)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()

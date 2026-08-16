@@ -107,6 +107,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/rounds/{roundID}/sync-results", adminHandler.SyncRoundResultsFromSheet)
 		r.Post("/rounds/{roundID}/properties", propertyHandler.CreateProperty)
 		r.Delete("/properties/{propertyID}", propertyHandler.DeleteProperty)
+		r.Post("/slots/{slotID}/reassign-judge", adminHandler.ReassignSlotJudge)
 	})
 
 	// Judge - locked to role=judge or role=admin
@@ -121,6 +122,12 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Get("/slots/available", round2Handler.AvailableSlots)
 		r.Get("/slots/my-claimed", round2Handler.MyClaimedSlots)
 		r.Post("/slots/{slotID}/close", round2Handler.CloseSlot)
+		r.Get("/slots/open-to-join", round2Handler.OpenSlotsToJoin)
+		r.Post("/slots/{slotID}/join", round2Handler.JoinSlot)
+		r.Get("/slots/{slotID}/co-judge-status", round2Handler.SlotCoJudgeStatus)
+		r.Post("/slots/{slotID}/mark-co-judge-present", round2Handler.MarkCoJudgePresent)
+		r.Post("/slots/{slotID}/mark-host-present", round2Handler.MarkHostPresent)
+		r.Post("/slots/{slotID}/prep", round2Handler.SetTeamPrep)
 		// Round 1 / 3 - live queue
 		r.Get("/queue", evalHandler.Queue)
 		r.Post("/evaluations/{id}/checkin", evalHandler.CheckIn)
@@ -128,6 +135,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/evaluations/{id}/submit", evalHandler.Submit)
 		r.Post("/evaluations/{id}/skip", evalHandler.Skip)
 		r.Post("/evaluations/{id}/noshow", evalHandler.NoShow)
+		r.Get("/users/search", adminHandler.SearchUsers)
 		r.Get("/lookup", evalHandler.LookupByEmail)
 		r.Post("/evaluations/{id}/properties/{propertyID}/rating", propertyHandler.RateEvaluationProperty)
 		r.Get("/evaluations/{id}/property-ratings", propertyHandler.EvaluationRatings)

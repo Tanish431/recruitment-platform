@@ -239,7 +239,7 @@ func (h *QueryHandler) OtherAssignmentsForRound(w http.ResponseWriter, r *http.R
 		ORDER BY s.start_time
 	`, roundID, excludeAssignmentID)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()

@@ -1,0 +1,3 @@
+ALTER TABLE slots DROP COLUMN IF EXISTS team_b_prep;
+ALTER TABLE slots DROP COLUMN IF EXISTS team_a_prep;
+DROP TABLE IF EXISTS slot_co_judges;

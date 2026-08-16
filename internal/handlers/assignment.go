@@ -42,13 +42,21 @@ type openSlot struct {
 	StartTime time.Time
 }
 
-func (h *AssignmentHandler) fetchOpenSlots(ctx context.Context, roundID int64) ([]openSlot, int, error) {
-	rows, err := h.Pool.Query(ctx, `
+func (h *AssignmentHandler) fetchOpenSlots(ctx context.Context, roundID int64, roundNumber int16) ([]openSlot, int, error) {
+	query := `
 		SELECT id, capacity - filled_count AS remaining, start_time
 		FROM slots
 		WHERE round_id = $1 AND capacity > filled_count
-		ORDER BY start_time
-	`, roundID)
+	`
+	switch roundNumber {
+	case 2:
+		query += ` AND (SELECT count(*) FROM slot_co_judges cj WHERE cj.slot_id = slots.id) >= 1`
+	case 3:
+		query += ` AND (SELECT count(*) FROM slot_co_judges cj WHERE cj.slot_id = slots.id) >= 2`
+	}
+	query += ` ORDER BY start_time`
+
+	rows, err := h.Pool.Query(ctx, query, roundID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -131,7 +139,7 @@ func (h *AssignmentHandler) RunAssignment(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	slots, totalCapacity, err := h.fetchOpenSlots(ctx, roundID)
+	slots, totalCapacity, err := h.fetchOpenSlots(ctx, roundID, roundNumber)
 	if err != nil {
 		http.Error(w, "failed to fetch open slots: "+err.Error(), http.StatusInternalServerError)
 		return
