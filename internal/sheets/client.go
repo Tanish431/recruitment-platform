@@ -41,7 +41,7 @@ func (c *Client) AppendRow(ctx context.Context, tabName string, row []interface{
 	return err
 }
 
-// LogEvent stays append-only — used for the query/swap audit trail, where
+// LogEvent stays append-only - used for the query/swap audit trail, where
 // history matters more than "current state."
 func (c *Client) LogEvent(ctx context.Context, tabName, candidateEmail, eventType string, details ...interface{}) error {
 	row := []interface{}{time.Now().Format(time.RFC3339), candidateEmail, eventType}

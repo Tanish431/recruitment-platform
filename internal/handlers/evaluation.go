@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -84,7 +85,7 @@ func (h *EvaluationHandler) Queue(w http.ResponseWriter, r *http.Request) {
 }
 
 // CheckIn marks a candidate as arrived. Any judge at the station can do
-// this — it's a shared fact, not tied to who ends up interviewing them.
+// this - it's a shared fact, not tied to who ends up interviewing them.
 func (h *EvaluationHandler) CheckIn(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -111,7 +112,7 @@ func (h *EvaluationHandler) CheckIn(w http.ResponseWriter, r *http.Request) {
 
 // Claim atomically assigns a checked-in candidate to the requesting judge.
 // The WHERE status='checked_in' guard is what prevents two judges claiming
-// the same candidate under a race — if this UPDATE affects 0 rows, someone
+// the same candidate under a race - if this UPDATE affects 0 rows, someone
 // else got there first.
 func (h *EvaluationHandler) Claim(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
@@ -165,7 +166,10 @@ func (h *EvaluationHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-
+	if req.Score < 1 || req.Score > 5 {
+		http.Error(w, "score must be between 1 and 5", http.StatusBadRequest)
+		return
+	}
 	tag, err := h.Pool.Exec(r.Context(), `
 		UPDATE evaluations
 		SET status = 'completed',
@@ -222,7 +226,7 @@ func (h *EvaluationHandler) Skip(w http.ResponseWriter, r *http.Request) {
 }
 
 // NoShow marks a candidate who never checked in as absent, once their
-// slot window has clearly passed. Terminal — no judge required.
+// slot window has clearly passed. Terminal - no judge required.
 func (h *EvaluationHandler) NoShow(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -280,13 +284,33 @@ func (h *EvaluationHandler) syncToSheet(ctx context.Context, evaluationID int64)
 	if comments != nil {
 		commentsStr = *comments
 	}
+	ratingsStr := h.formatPropertyRatings(ctx, "evaluation_property_ratings", "evaluation_id", evaluationID)
 
 	tab := fmt.Sprintf("Round%d", roundNumber)
 	row := []interface{}{
 		name, email, locationName, startTime.Format(time.RFC3339),
-		status, scoreStr, commentsStr, time.Now().Format(time.RFC3339),
+		status, scoreStr, ratingsStr, commentsStr, time.Now().Format(time.RFC3339),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, tab, "B", email, row)
+}
+
+func (h *EvaluationHandler) formatPropertyRatings(ctx context.Context, table, fkCol string, id int64) string {
+	rows, err := h.Pool.Query(ctx, fmt.Sprintf(`
+		SELECT rp.name, t.rating::text FROM %s t
+		JOIN round_scoring_properties rp ON rp.id = t.property_id
+		WHERE t.%s = $1 ORDER BY rp.position
+	`, table, fkCol), id)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var parts []string
+	for rows.Next() {
+		var name, rating string
+		rows.Scan(&name, &rating)
+		parts = append(parts, name+": "+rating)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // LookupByEmail finds a candidate's evaluation row for a round by email,

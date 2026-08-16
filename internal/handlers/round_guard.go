@@ -11,7 +11,7 @@ import (
 
 // blockIfRoundInactive writes a 403 and returns true if a non-admin caller
 // is targeting a round that isn't the currently admin-activated one.
-// Admins bypass this entirely — they need access to every round to set
+// Admins bypass this entirely - they need access to every round to set
 // things up ahead of time.
 func blockIfRoundInactive(ctx context.Context, pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request, roundID int64) bool {
 	role, _ := r.Context().Value(appmiddleware.UserRoleKey).(string)

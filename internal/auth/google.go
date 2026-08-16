@@ -49,7 +49,7 @@ func FetchUserInfo(ctx context.Context, cfg *oauth2.Config, token *oauth2.Token)
 }
 
 // ValidateDomain re-checks the email domain server-side. Never trust the
-// client-side `hd` param alone — it can be spoofed before it reaches you.
+// client-side `hd` param alone - it can be spoofed before it reaches you.
 func ValidateDomain(email, allowedDomain string) error {
 	if allowedDomain == "*" {
 		return nil

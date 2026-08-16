@@ -1,0 +1,1 @@
+ALTER TABLE slots ADD COLUMN closed_at TIMESTAMPTZ;

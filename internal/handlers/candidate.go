@@ -160,7 +160,7 @@ type submitUnavailabilityRequest struct {
 }
 
 // SubmitUnavailability lets a candidate flag dates they can't attend for a
-// round, once it's been announced — upserts, so resubmitting replaces their
+// round, once it's been announced - upserts, so resubmitting replaces their
 // previous answer rather than piling up entries.
 func (h *CandidateHandler) SubmitUnavailability(w http.ResponseWriter, r *http.Request) {
 	uid, ok := candidateID(r)
@@ -277,7 +277,7 @@ func (h *CandidateHandler) MyUnavailability(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(results)
 }
 
-// CancelQuery lets a candidate withdraw a pending query themselves — reverts
+// CancelQuery lets a candidate withdraw a pending query themselves - reverts
 // the assignment back to confirmed, same as if it were never raised.
 func (h *CandidateHandler) CancelQuery(w http.ResponseWriter, r *http.Request) {
 	uid, ok := candidateID(r)
@@ -321,6 +321,35 @@ func (h *CandidateHandler) CancelQuery(w http.ResponseWriter, r *http.Request) {
 
 	if err := tx.Commit(ctx); err != nil {
 		http.Error(w, "failed to commit", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// AcknowledgeResult marks a round's advancement/elimination status as seen,
+// so the dashboard toast doesn't fire again on future visits.
+func (h *CandidateHandler) AcknowledgeResult(w http.ResponseWriter, r *http.Request) {
+	uid, ok := candidateID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Round int `json:"round"` // 1 or 2
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Round != 1 && req.Round != 2) {
+		http.Error(w, "round must be 1 or 2", http.StatusBadRequest)
+		return
+	}
+
+	col := "round1_result_seen"
+	if req.Round == 2 {
+		col = "round2_result_seen"
+	}
+	_, err := h.Pool.Exec(r.Context(), fmt.Sprintf(`UPDATE users SET %s = true WHERE id = $1`, col), uid)
+	// safe: col is one of two hardcoded literals above, never derived from request input
+	if err != nil {
+		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

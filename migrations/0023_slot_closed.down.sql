@@ -1,0 +1,1 @@
+ALTER TABLE slots DROP COLUMN IF EXISTS closed_at;

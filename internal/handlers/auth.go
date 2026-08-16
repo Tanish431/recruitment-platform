@@ -68,7 +68,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   300, // 5 min, enough time to complete the consent flow
 	})
 
-	// hd hints Google to pre-filter to the campus domain in the picker —
+	// hd hints Google to pre-filter to the campus domain in the picker -
 	// this is a UX nicety only, NOT a security check. The real check
 	// happens server-side in Callback via auth.ValidateDomain.
 	url := h.OAuthCfg.AuthCodeURL(state, oauth2.SetAuthURLParam("hd", h.AllowedDomain), oauth2.SetAuthURLParam("prompt", "select_account"))
@@ -199,11 +199,11 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := h.Pool.QueryRow(r.Context(), `
-		SELECT id, campus_email, COALESCE(name,''), COALESCE(phone,''), COALESCE(whatsapp,''), role, is_active, created_at
+		SELECT id, campus_email, COALESCE(name,''), COALESCE(phone,''), COALESCE(whatsapp,''), role, round1_result::text, round2_result::text, round1_result_seen, round2_result_seen, is_active, created_at
 		FROM users WHERE id = $1
 	`, userID)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.CampusEmail, &u.Name, &u.Phone, &u.WhatsApp, &u.Role, &u.IsActive, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.CampusEmail, &u.Name, &u.Phone, &u.WhatsApp, &u.Role, &u.Round1Result, &u.Round2Result, &u.Round1ResultSeen, &u.Round2ResultSeen, &u.IsActive, &u.CreatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			http.Error(w, "user not found", http.StatusNotFound)
 			return

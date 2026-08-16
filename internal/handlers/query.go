@@ -82,8 +82,8 @@ type resolveQueryRequest struct {
 }
 
 // Resolve handles both query resolution paths: swap (trade slots between
-// two candidates — the Round 2 pattern, since every slot sits at exactly
-// capacity) or reassign (move into a slot with free capacity — the
+// two candidates - the Round 2 pattern, since every slot sits at exactly
+// capacity) or reassign (move into a slot with free capacity - the
 // Round 1/3 pattern).
 func (h *QueryHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	adminID, ok := candidateID(r) // same context key, works for any authed user
@@ -182,7 +182,7 @@ func (h *QueryHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// OpenSlotsForRound lists slots with free capacity — for the reassign dropdown.
+// OpenSlotsForRound lists slots with free capacity - for the reassign dropdown.
 func (h *QueryHandler) OpenSlotsForRound(w http.ResponseWriter, r *http.Request) {
 	roundID, err := strconv.ParseInt(r.URL.Query().Get("round_id"), 10, 64)
 	if err != nil {
@@ -220,7 +220,7 @@ func (h *QueryHandler) OpenSlotsForRound(w http.ResponseWriter, r *http.Request)
 }
 
 // OtherAssignmentsForRound lists other candidates' assignments in the same
-// round — for the swap dropdown, so admin picks by name, not ID.
+// round - for the swap dropdown, so admin picks by name, not ID.
 func (h *QueryHandler) OtherAssignmentsForRound(w http.ResponseWriter, r *http.Request) {
 	roundID, err := strconv.ParseInt(r.URL.Query().Get("round_id"), 10, 64)
 	if err != nil {
@@ -263,7 +263,7 @@ func (h *QueryHandler) OtherAssignmentsForRound(w http.ResponseWriter, r *http.R
 	json.NewEncoder(w).Encode(results)
 }
 
-// AdminCancelQuery lets an admin dismiss a query without swap/reassign —
+// AdminCancelQuery lets an admin dismiss a query without swap/reassign -
 // reverts the assignment to confirmed, same effect as the candidate
 // cancelling their own, but admin-initiated.
 func (h *QueryHandler) AdminCancelQuery(w http.ResponseWriter, r *http.Request) {

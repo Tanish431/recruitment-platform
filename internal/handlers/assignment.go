@@ -261,7 +261,7 @@ func (h *AssignmentHandler) RunAssignment(w http.ResponseWriter, r *http.Request
 	}
 	if len(unplacedDueToConflict) > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf(
-			"%d candidate(s) could not be placed anywhere without violating their stated unavailability — needs manual placement.",
+			"%d candidate(s) could not be placed anywhere without violating their stated unavailability - needs manual placement.",
 			len(unplacedDueToConflict),
 		))
 	}

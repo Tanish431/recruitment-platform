@@ -1,0 +1,2 @@
+ALTER TABLE users ADD COLUMN round1_result_seen BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN round2_result_seen BOOLEAN NOT NULL DEFAULT false;

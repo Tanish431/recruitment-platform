@@ -12,13 +12,16 @@ const (
 )
 
 type User struct {
-	ID           int64     `json:"id"`
-	CampusEmail  string    `json:"campus_email"`
-	Name         string    `json:"name"`
-	Phone        string    `json:"phone"`
-	WhatsApp     string    `json:"whatsapp"`
-	Role         Role      `json:"role"`
-	IsActive     bool      `json:"is_active"`
-	Round1Result *string   `json:"round1_result,omitempty"` // "advanced" | "eliminated"
-	CreatedAt    time.Time `json:"created_at"`
+	ID               int64     `json:"id"`
+	CampusEmail      string    `json:"campus_email"`
+	Name             string    `json:"name"`
+	Phone            string    `json:"phone"`
+	WhatsApp         string    `json:"whatsapp"`
+	Role             Role      `json:"role"`
+	IsActive         bool      `json:"is_active"`
+	Round1Result     *string   `json:"round1_result,omitempty"` // "advanced" | "eliminated"
+	Round2Result     *string   `json:"round2_result,omitempty"` // "advanced" | "eliminated"
+	Round1ResultSeen bool      `json:"round1_result_seen"`
+	Round2ResultSeen bool      `json:"round2_result_seen"`
+	CreatedAt        time.Time `json:"created_at"`
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,7 +26,7 @@ func NewRound2Handler(pool *pgxpool.Pool, sheetsClient *sheets.Client) *Round2Ha
 }
 
 // AvailableSlots lists open (location, time) combos a judge can still claim
-// for round 2 — only shown while the round's slot_creation_open flag is true.
+// for round 2 - only shown while the round's slot_creation_open flag is true.
 func (h *Round2Handler) AvailableSlots(w http.ResponseWriter, r *http.Request) {
 	roundID, err := strconv.ParseInt(r.URL.Query().Get("round_id"), 10, 64)
 	if err != nil {
@@ -36,13 +37,13 @@ func (h *Round2Handler) AvailableSlots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var open bool
-	if err := h.Pool.QueryRow(r.Context(), `SELECT slot_creation_open FROM rounds WHERE id = $1`, roundID).Scan(&open); err != nil {
+	var exists bool
+	if err := h.Pool.QueryRow(r.Context(), `SELECT true FROM rounds WHERE id = $1`, roundID).Scan(&exists); err != nil {
 		http.Error(w, "round not found", http.StatusNotFound)
 		return
 	}
-	if !open {
-		http.Error(w, "slot creation is closed for this round", http.StatusForbidden)
+	if !exists {
+		http.Error(w, "round not found", http.StatusNotFound)
 		return
 	}
 
@@ -89,7 +90,7 @@ type claimSlotRequest struct {
 
 // ClaimSlot lets a judge create-and-claim a (location, time) slot in one
 // step. The DB's uq_slot_location_time constraint is the actual FCFS
-// enforcement — this handler just surfaces a clean 409 when it fires.
+// enforcement - this handler just surfaces a clean 409 when it fires.
 func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
 	if !ok {
@@ -108,13 +109,9 @@ func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 	if blockIfRoundInactive(r.Context(), h.Pool, w, r, req.RoundID) { // or roundID, matching whichever var name is local
 		return
 	}
-	var open bool
-	if err := h.Pool.QueryRow(r.Context(), `SELECT slot_creation_open FROM rounds WHERE id = $1`, req.RoundID).Scan(&open); err != nil {
+	var exists bool
+	if err := h.Pool.QueryRow(r.Context(), `SELECT true FROM rounds WHERE id = $1`, req.RoundID).Scan(&exists); err != nil {
 		http.Error(w, "round not found", http.StatusNotFound)
-		return
-	}
-	if !open {
-		http.Error(w, "slot creation is closed for this round", http.StatusForbidden)
 		return
 	}
 
@@ -132,7 +129,7 @@ func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 
 	var id int64
 	if err := row.Scan(&id); err != nil {
-		// unique constraint fires here — someone else claimed this exact
+		// unique constraint fires here - someone else claimed this exact
 		// (location, time) first. This IS the FCFS mechanism.
 		http.Error(w, "slot already claimed by another judge", http.StatusConflict)
 		return
@@ -142,7 +139,7 @@ func (h *Round2Handler) ClaimSlot(w http.ResponseWriter, r *http.Request) {
 }
 
 // Participants lists the 6 candidates in a slot the judge is hosting,
-// with current attendance/score state — the judge's scoring screen.
+// with current attendance/score state - the judge's scoring screen.
 func (h *Round2Handler) Participants(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
 	if !ok {
@@ -271,6 +268,10 @@ func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	if req.Score < 1 || req.Score > 5 {
+		http.Error(w, "score must be between 1 and 5", http.StatusBadRequest)
+		return
+	}
 
 	tag, err := h.Pool.Exec(r.Context(), `
 		UPDATE debate_participants dp
@@ -326,11 +327,32 @@ func (h *Round2Handler) syncParticipantToSheet(ctx context.Context, participantI
 		commentsStr = *comments
 	}
 
+	ratingsStr := h.formatPropertyRatings(ctx, "participant_property_ratings", "evaluation_id", participantID)
+
 	row := []interface{}{
 		name, email, locationName, startTime.Format(time.RFC3339), team,
-		attendance, scoreStr, commentsStr, time.Now().Format(time.RFC3339),
+		attendance, scoreStr, ratingsStr, commentsStr, time.Now().Format(time.RFC3339),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, "Round2", "B", email, row)
+}
+
+func (h *Round2Handler) formatPropertyRatings(ctx context.Context, table, fkCol string, id int64) string {
+	rows, err := h.Pool.Query(ctx, fmt.Sprintf(`
+			SELECT rp.name, t.rating::text FROM %s t
+			JOIN round_scoring_properties rp ON rp.id = t.property_id
+			WHERE t.%s = $1 ORDER BY rp.position
+		`, table, fkCol), id)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var parts []string
+	for rows.Next() {
+		var name, rating string
+		rows.Scan(&name, &rating)
+		parts = append(parts, name+": "+rating)
+	}
+	return strings.Join(parts, ", ")
 }
 
 type myClaimedSlot struct {
@@ -342,7 +364,7 @@ type myClaimedSlot struct {
 }
 
 // MyClaimedSlots lists slots this judge has personally claimed for the
-// round — lets them jump back into scoring without re-claiming.
+// round - lets them jump back into scoring without re-claiming.
 func (h *Round2Handler) MyClaimedSlots(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
 	if !ok {
@@ -358,7 +380,7 @@ func (h *Round2Handler) MyClaimedSlots(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.Pool.Query(r.Context(), `
 		SELECT s.id, l.name, s.start_time, s.filled_count, s.capacity
 		FROM slots s JOIN locations l ON l.id = s.location_id
-		WHERE s.round_id = $1 AND s.created_by = $2
+		WHERE s.round_id = $1 AND s.created_by = $2 AND s.closed_at IS NULL
 		ORDER BY s.start_time DESC
 	`, roundID, uid)
 	if err != nil {
@@ -377,4 +399,29 @@ func (h *Round2Handler) MyClaimedSlots(w http.ResponseWriter, r *http.Request) {
 		results = append(results, s)
 	}
 	json.NewEncoder(w).Encode(results)
+}
+
+func (h *Round2Handler) CloseSlot(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	tag, err := h.Pool.Exec(r.Context(), `
+		UPDATE slots SET closed_at = now() WHERE id = $1 AND created_by = $2
+	`, slotID, uid)
+	if err != nil {
+		http.Error(w, "update failed", http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		http.Error(w, "slot not found or not yours", http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

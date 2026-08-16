@@ -231,7 +231,7 @@ func (h *AdminHandler) PromoteToJudge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		http.Error(w, "user not found — they need to log in at least once first", http.StatusNotFound)
+		http.Error(w, "user not found - they need to log in at least once first", http.StatusNotFound)
 		return
 	}
 
@@ -442,7 +442,7 @@ func (h *AdminHandler) ImportFromSheet(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err := auth.ValidateDomain(email, h.AllowedDomain); err != nil {
-			errs = append(errs, fmt.Sprintf("row %d: %s — %s", i+2, email, err))
+			errs = append(errs, fmt.Sprintf("row %d: %s - %s", i+2, email, err))
 			skipped++
 			continue
 		}
@@ -465,7 +465,7 @@ func (h *AdminHandler) ImportFromSheet(w http.ResponseWriter, r *http.Request) {
 			ON CONFLICT (campus_email) DO NOTHING
 		`, email, name, phone, whatsapp)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("row %d: db error — %s", i+2, err.Error()))
+			errs = append(errs, fmt.Sprintf("row %d: db error - %s", i+2, err.Error()))
 			continue
 		}
 		if tag.RowsAffected() > 0 {
@@ -481,7 +481,7 @@ func (h *AdminHandler) ImportFromSheet(w http.ResponseWriter, r *http.Request) {
 			    is_active = true
 			WHERE campus_email = $1
 		`, email, name, phone, whatsapp); err != nil {
-			errs = append(errs, fmt.Sprintf("row %d: db update error — %s", i+2, err.Error()))
+			errs = append(errs, fmt.Sprintf("row %d: db update error - %s", i+2, err.Error()))
 			continue
 		}
 		updated++
@@ -660,7 +660,7 @@ func (h *AdminHandler) GenerateSchedule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if requiredCapacity == 0 {
-		http.Error(w, "no eligible candidates found for this round — cannot size the schedule", http.StatusBadRequest)
+		http.Error(w, "no eligible candidates found for this round - cannot size the schedule", http.StatusBadRequest)
 		return
 	}
 
@@ -846,27 +846,6 @@ func (h *AdminHandler) ListRounds(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(rounds)
 }
 
-func (h *AdminHandler) ToggleSlotCreation(w http.ResponseWriter, r *http.Request) {
-	roundID, err := strconv.ParseInt(chi.URLParam(r, "roundID"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid round id", http.StatusBadRequest)
-		return
-	}
-	var req struct {
-		Open bool `json:"open"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-	_, err = h.Pool.Exec(r.Context(), `UPDATE rounds SET slot_creation_open = $1 WHERE id = $2`, req.Open, roundID)
-	if err != nil {
-		http.Error(w, "update failed", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func (h *AdminHandler) ListLocations(w http.ResponseWriter, r *http.Request) {
 	roundID, err := strconv.ParseInt(r.URL.Query().Get("round_id"), 10, 64)
 	if err != nil {
@@ -989,14 +968,14 @@ func (h *AdminHandler) AddCandidateToSlot(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// check unavailability, but only WARN — never block a manual add, since
+	// check unavailability, but only WARN - never block a manual add, since
 	// admin might have a good reason to override (candidate's plans changed, etc.)
 	var conflict bool
 	err = tx.QueryRow(ctx, `
 		SELECT $1 = ANY(unavailable_dates) FROM candidate_unavailability
 		WHERE candidate_id = $2 AND round_id = $3
 	`, slotStart.Format("2006-01-02"), req.CandidateID, roundID).Scan(&conflict)
-	// no row found just means no unavailability submitted — not an error
+	// no row found just means no unavailability submitted - not an error
 	if err != nil && err != pgx.ErrNoRows {
 		conflict = false
 	}
@@ -1331,7 +1310,7 @@ func (h *AdminHandler) SyncRoundResultsFromSheet(w http.ResponseWriter, r *http.
 		return
 	}
 	if statusCol == -1 {
-		http.Error(w, "no 'Status' column found in "+tabName+" — add one with 'advanced'/'eliminated' values per row", http.StatusBadRequest)
+		http.Error(w, "no 'Status' column found in "+tabName+" - add one with 'advanced'/'eliminated' values per row", http.StatusBadRequest)
 		return
 	}
 
@@ -1379,4 +1358,31 @@ func (h *AdminHandler) SyncRoundResultsFromSheet(w http.ResponseWriter, r *http.
 	}
 
 	json.NewEncoder(w).Encode(map[string]int{"updated": updated, "skipped": skipped})
+}
+
+type updateSlotLocationRequest struct {
+	LocationID int64 `json:"location_id"`
+}
+
+func (h *AdminHandler) UpdateSlotLocation(w http.ResponseWriter, r *http.Request) {
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	var req updateSlotLocationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	tag, err := h.Pool.Exec(r.Context(), `UPDATE slots SET location_id = $1 WHERE id = $2`, req.LocationID, slotID)
+	if err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

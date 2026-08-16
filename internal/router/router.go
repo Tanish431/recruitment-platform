@@ -43,6 +43,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 	round2Handler := handlers.NewRound2Handler(pool, sheetsClient)
 	candidateHandler := handlers.NewCandidateHandler(pool, sheetsClient)
 	queryHandler := handlers.NewQueryHandler(pool, sheetsClient)
+	propertyHandler := handlers.NewPropertyHandler(pool)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -65,15 +66,18 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Get("/me/unavailability", candidateHandler.MyUnavailability)
 		r.Get("/rounds", adminHandler.ListRounds)
 		r.Get("/rounds/active", adminHandler.ActiveRound)
+		r.Get("/rounds/{roundID}/properties", propertyHandler.ListProperties)
+		r.Post("/me/acknowledge-result", candidateHandler.AcknowledgeResult)
+		r.Get("/locations", adminHandler.ListLocations)
 	})
 
-	// Admin — locked to role=admin
+	// Admin - locked to role=admin
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(authMW.RequireAuth)
 		r.Use(func(next http.Handler) http.Handler {
 			return appmiddleware.RequireRole(next, "admin")
 		})
-
+		r.Patch("/slots/{slotID}/location", adminHandler.UpdateSlotLocation)
 		r.Post("/candidates/import-from-sheet", adminHandler.ImportFromSheet)
 		r.Patch("/slots/{slotID}/capacity", adminHandler.UpdateSlotCapacity)
 		r.Post("/slots", adminHandler.CreateSlot)
@@ -93,7 +97,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/queries/{queryID}/resolve", queryHandler.Resolve)
 		r.Get("/queries/open-slots", queryHandler.OpenSlotsForRound)
 		r.Get("/queries/other-assignments", queryHandler.OtherAssignmentsForRound)
-		r.Post("/rounds/{roundID}/toggle-slot-creation", adminHandler.ToggleSlotCreation)
 		r.Delete("/queries/{queryID}", queryHandler.AdminCancelQuery)
 		r.Get("/locations", adminHandler.ListLocations)
 		r.Post("/locations", adminHandler.CreateLocation)
@@ -102,21 +105,23 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/slots/{slotID}/candidates", adminHandler.AddCandidateToSlot)
 		r.Get("/rounds/{roundID}/unassigned-candidates", adminHandler.ListUnassignedCandidates)
 		r.Post("/rounds/{roundID}/sync-results", adminHandler.SyncRoundResultsFromSheet)
+		r.Post("/rounds/{roundID}/properties", propertyHandler.CreateProperty)
+		r.Delete("/properties/{propertyID}", propertyHandler.DeleteProperty)
 	})
 
-	// Judge — locked to role=judge or role=admin
+	// Judge - locked to role=judge or role=admin
 	r.Route("/judge", func(r chi.Router) {
 		r.Use(authMW.RequireAuth)
 		r.Use(func(next http.Handler) http.Handler {
 			return appmiddleware.RequireRole(next, "judge", "admin")
 		})
 
-		// Round 2 — slot claiming
+		// Round 2 - slot claiming
 		r.Post("/slots/claim", round2Handler.ClaimSlot)
 		r.Get("/slots/available", round2Handler.AvailableSlots)
 		r.Get("/slots/my-claimed", round2Handler.MyClaimedSlots)
-
-		// Round 1 / 3 — live queue
+		r.Post("/slots/{slotID}/close", round2Handler.CloseSlot)
+		// Round 1 / 3 - live queue
 		r.Get("/queue", evalHandler.Queue)
 		r.Post("/evaluations/{id}/checkin", evalHandler.CheckIn)
 		r.Post("/evaluations/{id}/claim", evalHandler.Claim)
@@ -124,8 +129,12 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/evaluations/{id}/skip", evalHandler.Skip)
 		r.Post("/evaluations/{id}/noshow", evalHandler.NoShow)
 		r.Get("/lookup", evalHandler.LookupByEmail)
+		r.Post("/evaluations/{id}/properties/{propertyID}/rating", propertyHandler.RateEvaluationProperty)
+		r.Get("/evaluations/{id}/property-ratings", propertyHandler.EvaluationRatings)
+		r.Post("/participants/{id}/properties/{propertyID}/rating", propertyHandler.RateParticipantProperty)
+		r.Get("/participants/{id}/property-ratings", propertyHandler.ParticipantRatings)
 
-		// Round 2 — scoring the slot they claimed
+		// Round 2 - scoring the slot they claimed
 		r.Get("/slots/{slotID}/participants", round2Handler.Participants)
 		r.Post("/participants/{id}/attendance", round2Handler.SetAttendance)
 		r.Post("/participants/{id}/score", round2Handler.SetScore)
