@@ -80,6 +80,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Patch("/slots/{slotID}/location", adminHandler.UpdateSlotLocation)
 		r.Post("/candidates/import-from-sheet", adminHandler.ImportFromSheet)
 		r.Patch("/slots/{slotID}/capacity", adminHandler.UpdateSlotCapacity)
+		r.Get("/slots/{slotID}/judges", adminHandler.SlotJudges)
 		r.Post("/slots", adminHandler.CreateSlot)
 		r.Get("/slots", adminHandler.ListSlots)
 		r.Delete("/slots/{slotID}", adminHandler.DeleteSlot)
@@ -108,6 +109,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/rounds/{roundID}/properties", propertyHandler.CreateProperty)
 		r.Delete("/properties/{propertyID}", propertyHandler.DeleteProperty)
 		r.Post("/slots/{slotID}/reassign-judge", adminHandler.ReassignSlotJudge)
+		r.Post("/slots/{slotID}/judges/{judgeID}/mark-present", adminHandler.MarkR3JudgePresent)
 	})
 
 	// Judge - locked to role=judge or role=admin
@@ -128,6 +130,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/slots/{slotID}/mark-co-judge-present", round2Handler.MarkCoJudgePresent)
 		r.Post("/slots/{slotID}/mark-host-present", round2Handler.MarkHostPresent)
 		r.Post("/slots/{slotID}/prep", round2Handler.SetTeamPrep)
+		r.Post("/slots/{slotID}/set-scorer", round2Handler.SetScorer)
+		r.Post("/slots/{slotID}/motion", round2Handler.SetMotion)
 		// Round 1 / 3 - live queue
 		r.Get("/queue", evalHandler.Queue)
 		r.Post("/evaluations/{id}/checkin", evalHandler.CheckIn)

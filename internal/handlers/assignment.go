@@ -129,13 +129,22 @@ func (h *AssignmentHandler) RunAssignment(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	reconciledCount, reconWarnings, err := h.reconcileUnavailability(ctx, roundID)
+	if err != nil {
+		http.Error(w, "failed to reconcile unavailability: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	pool, err := h.fetchEligiblePool(ctx, roundID, roundNumber)
 	if err != nil {
 		http.Error(w, "failed to fetch candidate pool: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if len(pool) == 0 {
-		http.Error(w, "no eligible candidates for this round", http.StatusBadRequest)
+		warnings := append([]string{"No new candidates to place — everyone eligible is already assigned."}, reconWarnings...)
+		json.NewEncoder(w).Encode(assignResult{
+			PoolSize: 0, GroupsFormed: 0, SlotsFilled: 0, Unplaced: 0, Warnings: warnings,
+		})
 		return
 	}
 
@@ -267,6 +276,15 @@ func (h *AssignmentHandler) RunAssignment(w http.ResponseWriter, r *http.Request
 		SlotsFilled:  len(slotFillMap),
 		Unplaced:     len(unplacedDueToConflict),
 	}
+	if reconciledCount > 0 || len(reconWarnings) > 0 {
+		if reconciledCount > 0 {
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"%d existing placement(s) were moved to resolve date conflicts.",
+				reconciledCount,
+			))
+		}
+		result.Warnings = append(result.Warnings, reconWarnings...)
+	}
 	if len(unplacedDueToConflict) > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf(
 			"%d candidate(s) could not be placed anywhere without violating their stated unavailability - needs manual placement.",
@@ -355,4 +373,109 @@ func (h *AssignmentHandler) syncAssignmentsToSheets(ctx context.Context, roundNu
 			}
 		}
 	}
+}
+
+func (h *AssignmentHandler) reconcileUnavailability(ctx context.Context, roundID int64) (int, []string, error) {
+	unavail, err := h.fetchUnavailability(ctx, roundID)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	rows, err := h.Pool.Query(ctx, `
+		SELECT a.id, a.candidate_id, a.slot_id, s.start_time
+		FROM assignments a JOIN slots s ON s.id = a.slot_id
+		WHERE s.round_id = $1
+	`, roundID)
+	if err != nil {
+		return 0, nil, err
+	}
+	type placement struct {
+		AssignmentID, CandidateID, SlotID int64
+		SlotDate                          string
+	}
+	var placements []placement
+	for rows.Next() {
+		var p placement
+		var st time.Time
+		if err := rows.Scan(&p.AssignmentID, &p.CandidateID, &p.SlotID, &st); err != nil {
+			rows.Close()
+			return 0, nil, err
+		}
+		p.SlotDate = st.Format("2006-01-02")
+		placements = append(placements, p)
+	}
+	rows.Close()
+
+	var conflicted []placement
+	for _, p := range placements {
+		if unavail[p.CandidateID][p.SlotDate] {
+			conflicted = append(conflicted, p)
+		}
+	}
+	if len(conflicted) == 0 {
+		return 0, nil, nil
+	}
+
+	openRows, err := h.Pool.Query(ctx, `
+		SELECT id, start_time, capacity - filled_count FROM slots
+		WHERE round_id = $1 AND is_buffer = false AND capacity > filled_count
+		ORDER BY start_time
+	`, roundID)
+	if err != nil {
+		return 0, nil, err
+	}
+	type openS struct {
+		ID        int64
+		Date      string
+		Remaining int
+	}
+	var openSlots []openS
+	for openRows.Next() {
+		var s openS
+		var st time.Time
+		if err := openRows.Scan(&s.ID, &st, &s.Remaining); err != nil {
+			openRows.Close()
+			return 0, nil, err
+		}
+		s.Date = st.Format("2006-01-02")
+		openSlots = append(openSlots, s)
+	}
+	openRows.Close()
+
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	moved := 0
+	var warnings []string
+
+	for _, p := range conflicted {
+		placedNew := false
+		for i := range openSlots {
+			s := &openSlots[i]
+			if s.Remaining <= 0 || s.ID == p.SlotID || unavail[p.CandidateID][s.Date] {
+				continue
+			}
+			if err := reassignAssignment(ctx, tx, p.AssignmentID, s.ID); err != nil {
+				continue
+			}
+			s.Remaining--
+			moved++
+			placedNew = true
+			break
+		}
+		if !placedNew {
+			warnings = append(warnings, fmt.Sprintf(
+				"candidate %d is on a now-unavailable date and no open slot could take them — needs manual attention",
+				p.CandidateID,
+			))
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, nil, err
+	}
+	return moved, warnings, nil
 }

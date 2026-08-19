@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -266,12 +265,15 @@ type coJudgeStatusView struct {
 	YouAreHost               bool    `json:"you_are_host"`
 	YouAreCoJudge            bool    `json:"you_are_co_judge"`
 	ScoringUnlocked          bool    `json:"scoring_unlocked"`
+	ScorerJudgeID            int64   `json:"scorer_judge_id"`
+	ScorerName               string  `json:"scorer_name"`
+	ScorerChosen             bool    `json:"scorer_chosen"`
+	YouAreScorer             bool    `json:"you_are_scorer"`
 	TeamAPrep                string  `json:"team_a_prep"`
 	TeamBPrep                string  `json:"team_b_prep"`
+	Motion                   string  `json:"motion"`
 }
 
-// SlotCoJudgeStatus is the combined view a judge's UI polls to know who's
-// hosting/co-judging and whether scoring is unlocked yet.
 func (h *Round2Handler) SlotCoJudgeStatus(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
 	if !ok {
@@ -285,24 +287,23 @@ func (h *Round2Handler) SlotCoJudgeStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	var v coJudgeStatusView
+	var scorerJudgeID *int64
 	err = h.Pool.QueryRow(r.Context(), `
 		SELECT s.id, s.created_by, COALESCE(hu.name, hu.campus_email, ''),
-		       cj.judge_id, cu.name, cu.campus_email,
-		       COALESCE(cj.host_marked_present, false), COALESCE(cj.co_judge_marked_host_present, false),
-		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, '')
+		       cj.judge_id, COALESCE(cj.host_marked_present, false), COALESCE(cj.co_judge_marked_host_present, false),
+		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, ''), COALESCE(s.motion, ''), s.scorer_judge_id
 		FROM slots s
 		JOIN users hu ON hu.id = s.created_by
 		LEFT JOIN slot_co_judges cj ON cj.slot_id = s.id
-		LEFT JOIN users cu ON cu.id = cj.judge_id
 		WHERE s.id = $1
-	`, slotID).Scan(&v.SlotID, &v.HostID, &v.HostName, &v.CoJudgeID, new(sql.NullString), new(sql.NullString),
-		&v.HostMarkedCoJudgePresent, &v.CoJudgeMarkedHostPresent, &v.TeamAPrep, &v.TeamBPrep)
+	`, slotID).Scan(&v.SlotID, &v.HostID, &v.HostName, &v.CoJudgeID,
+		&v.HostMarkedCoJudgePresent, &v.CoJudgeMarkedHostPresent,
+		&v.TeamAPrep, &v.TeamBPrep, &v.Motion, &scorerJudgeID)
 	if err != nil {
 		http.Error(w, "slot not found", http.StatusNotFound)
 		return
 	}
 
-	// re-query co-judge name cleanly (nullable name/email combo needs its own scan)
 	if v.CoJudgeID != nil {
 		var name string
 		h.Pool.QueryRow(r.Context(), `SELECT COALESCE(name, campus_email, '') FROM users WHERE id = $1`, *v.CoJudgeID).Scan(&name)
@@ -312,6 +313,19 @@ func (h *Round2Handler) SlotCoJudgeStatus(w http.ResponseWriter, r *http.Request
 	v.YouAreHost = v.HostID == uid
 	v.YouAreCoJudge = v.CoJudgeID != nil && *v.CoJudgeID == uid
 	v.ScoringUnlocked = v.CoJudgeID != nil && v.HostMarkedCoJudgePresent && v.CoJudgeMarkedHostPresent
+
+	effectiveScorer := v.HostID
+	if scorerJudgeID != nil {
+		effectiveScorer = *scorerJudgeID
+		v.ScorerChosen = true
+	}
+	v.ScorerJudgeID = effectiveScorer
+	v.YouAreScorer = effectiveScorer == uid
+	if effectiveScorer == v.HostID {
+		v.ScorerName = v.HostName
+	} else if v.CoJudgeName != nil {
+		v.ScorerName = *v.CoJudgeName
+	}
 
 	json.NewEncoder(w).Encode(v)
 }
@@ -365,11 +379,10 @@ func (h *Round2Handler) MarkHostPresent(w http.ResponseWriter, r *http.Request) 
 }
 
 type prepRequest struct {
-	Team string `json:"team"` // "A" | "B"
+	Team string `json:"team"`
 	Text string `json:"text"`
 }
 
-// SetTeamPrep: host-only, records pre-debate prep notes per team.
 func (h *Round2Handler) SetTeamPrep(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
 	if !ok {
@@ -386,20 +399,27 @@ func (h *Round2Handler) SetTeamPrep(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "team must be A or B", http.StatusBadRequest)
 		return
 	}
+
+	ctx := r.Context()
+	scorer, err := h.effectiveScorer(ctx, slotID)
+	if err != nil || scorer != uid {
+		http.Error(w, "you are not the designated scorer for this slot", http.StatusForbidden)
+		return
+	}
+
 	col := "team_a_prep"
 	if req.Team == "B" {
 		col = "team_b_prep"
 	}
 	// safe: col is one of two hardcoded literals above, never derived from request input
-	query := fmt.Sprintf(`UPDATE slots SET %s = $1 WHERE id = $2 AND created_by = $3`, col)
-	tag, err := h.Pool.Exec(r.Context(), query, req.Text, slotID, uid)
-	if err != nil {
+	query := fmt.Sprintf(`UPDATE slots SET %s = $1 WHERE id = $2`, col)
+	if _, err := h.Pool.Exec(ctx, query, req.Text, slotID); err != nil {
 		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		http.Error(w, "not your slot", http.StatusForbidden)
-		return
+
+	if h.Sheets != nil {
+		go h.syncSlotToSheet(context.Background(), slotID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -427,25 +447,26 @@ func (h *Round2Handler) Participants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var hostID int64
-	if err := h.Pool.QueryRow(r.Context(), `SELECT created_by FROM slots WHERE id = $1`, slotID).Scan(&hostID); err != nil {
+	ctx := r.Context()
+	scorer, err := h.effectiveScorer(ctx, slotID)
+	if err != nil {
 		http.Error(w, "slot not found", http.StatusNotFound)
 		return
 	}
-	if hostID != uid {
-		http.Error(w, "you did not claim this slot", http.StatusForbidden)
+	if scorer != uid {
+		http.Error(w, "you are not the designated scorer for this slot", http.StatusForbidden)
 		return
 	}
 
-	rows, err := h.Pool.Query(r.Context(), `
+	rows, err := h.Pool.Query(ctx, `
 		SELECT dp.id, dp.candidate_id, COALESCE(u.name,''), u.campus_email, dp.team, dp.attendance, dp.score, dp.comments
 		FROM debate_participants dp
 		JOIN users u ON u.id = dp.candidate_id
-		WHERE dp.slot_id = $1 AND u.is_active = true
+		WHERE dp.slot_id = $1
 		ORDER BY dp.team, u.campus_email
 	`, slotID)
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -489,7 +510,6 @@ func (h *Round2Handler) SetAttendance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid participant id", http.StatusBadRequest)
 		return
 	}
-
 	var req attendanceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -500,24 +520,27 @@ func (h *Round2Handler) SetAttendance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tag, err := h.Pool.Exec(r.Context(), `
-		UPDATE debate_participants dp
-		SET attendance = $1
-		FROM slots s
-		WHERE dp.id = $2 AND dp.slot_id = s.id AND s.created_by = $3
-	`, req.Attendance, id, uid)
+	ctx := r.Context()
+	var slotID int64
+	h.Pool.QueryRow(ctx, `SELECT slot_id FROM debate_participants WHERE id = $1`, id).Scan(&slotID)
+	scorer, err := h.effectiveScorer(ctx, slotID)
+	if err != nil || scorer != uid {
+		http.Error(w, "you are not the designated scorer for this slot", http.StatusForbidden)
+		return
+	}
+
+	tag, err := h.Pool.Exec(ctx, `UPDATE debate_participants SET attendance = $1 WHERE id = $2`, req.Attendance, id)
 	if err != nil {
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		http.Error(w, "participant not found or not your slot", http.StatusForbidden)
+		http.Error(w, "participant not found", http.StatusNotFound)
 		return
 	}
 	if h.Sheets != nil {
 		go h.syncParticipantToSheet(context.Background(), id)
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -537,14 +560,6 @@ func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid participant id", http.StatusBadRequest)
 		return
 	}
-
-	var slotID int64
-	h.Pool.QueryRow(r.Context(), `SELECT slot_id FROM debate_participants WHERE id = $1`, id).Scan(&slotID)
-	if !h.coJudgeConfirmed(r.Context(), slotID) {
-		http.Error(w, "confirm co-judge attendance before entering scores", http.StatusForbidden)
-		return
-	}
-
 	var req scoreRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -555,25 +570,30 @@ func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tag, err := h.Pool.Exec(r.Context(), `
-		UPDATE debate_participants dp
-		SET score = $1, comments = $2, submitted_at = now()
-		FROM slots s
-		WHERE dp.id = $3 AND dp.slot_id = s.id AND s.created_by = $4 AND dp.attendance = 'present'
-	`, req.Score, req.Comments, id, uid)
+	ctx := r.Context()
+	var slotID int64
+	h.Pool.QueryRow(ctx, `SELECT slot_id FROM debate_participants WHERE id = $1`, id).Scan(&slotID)
+	scorer, err := h.effectiveScorer(ctx, slotID)
+	if err != nil || scorer != uid {
+		http.Error(w, "you are not the designated scorer for this slot", http.StatusForbidden)
+		return
+	}
+
+	tag, err := h.Pool.Exec(ctx, `
+		UPDATE debate_participants SET score = $1, comments = $2, submitted_at = now()
+		WHERE id = $3 AND attendance = 'present'
+	`, req.Score, req.Comments, id)
 	if err != nil {
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		http.Error(w, "participant not found, not your slot, or not marked present", http.StatusForbidden)
+		http.Error(w, "participant not found or not marked present", http.StatusForbidden)
 		return
 	}
-
 	if h.Sheets != nil {
 		go h.syncParticipantToSheet(context.Background(), id)
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -588,15 +608,17 @@ func (h *Round2Handler) syncParticipantToSheet(ctx context.Context, participantI
 	var startTime time.Time
 	var score *int
 	var comments *string
+	var teamAPrep, teamBPrep, motion string
 
 	err := h.Pool.QueryRow(ctx, `
-		SELECT COALESCE(u.name, ''), u.campus_email, l.name, s.start_time, dp.team, dp.attendance, dp.score, dp.comments
+		SELECT COALESCE(u.name, ''), u.campus_email, l.name, s.start_time, dp.team, dp.attendance, dp.score, dp.comments,
+		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, ''), COALESCE(s.motion, '')
 		FROM debate_participants dp
 		JOIN users u ON u.id = dp.candidate_id
 		JOIN slots s ON s.id = dp.slot_id
 		JOIN locations l ON l.id = s.location_id
 		WHERE dp.id = $1
-	`, participantID).Scan(&name, &email, &locationName, &startTime, &team, &attendance, &score, &comments)
+	`, participantID).Scan(&name, &email, &locationName, &startTime, &team, &attendance, &score, &comments, &teamAPrep, &teamBPrep, &motion)
 	if err != nil {
 		return
 	}
@@ -611,9 +633,18 @@ func (h *Round2Handler) syncParticipantToSheet(ctx context.Context, participantI
 
 	ratingsStr := h.formatPropertyRatings(ctx, "participant_property_ratings", "evaluation_id", participantID)
 
+	visibleTeamAPrep := ""
+	visibleTeamBPrep := ""
+	if team == "A" {
+		visibleTeamAPrep = teamAPrep
+	} else if team == "B" {
+		visibleTeamBPrep = teamBPrep
+	}
+
 	row := []interface{}{
 		name, email, locationName, startTime.Format(time.RFC3339), team,
-		attendance, scoreStr, ratingsStr, commentsStr, time.Now().Format(time.RFC3339),
+		visibleTeamAPrep, visibleTeamBPrep, motion, attendance, scoreStr, ratingsStr, commentsStr,
+		time.Now().Format(time.RFC3339),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, "Round2", "B", email, row)
 }
@@ -662,11 +693,12 @@ func (h *Round2Handler) MyClaimedSlots(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.Pool.Query(r.Context(), `
 		SELECT s.id, l.name, s.start_time, s.filled_count, s.capacity
 		FROM slots s JOIN locations l ON l.id = s.location_id
-		WHERE s.round_id = $1 AND s.created_by = $2 AND s.closed_at IS NULL
+		WHERE s.round_id = $1 AND s.closed_at IS NULL
+		AND (s.created_by = $2 OR s.id IN (SELECT slot_id FROM slot_co_judges WHERE judge_id = $2))
 		ORDER BY s.start_time DESC
 	`, roundID, uid)
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -706,4 +738,128 @@ func (h *Round2Handler) CloseSlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// effectiveScorer returns who's allowed to mark attendance/score for a
+// slot: whoever the host explicitly delegated to (scorer_judge_id), or the
+// host themself by default if no delegation has happened yet.
+func (h *Round2Handler) effectiveScorer(ctx context.Context, slotID int64) (int64, error) {
+	var hostID int64
+	var scorerID *int64
+	err := h.Pool.QueryRow(ctx, `SELECT created_by, scorer_judge_id FROM slots WHERE id = $1`, slotID).Scan(&hostID, &scorerID)
+	if err != nil {
+		return 0, err
+	}
+	if scorerID != nil {
+		return *scorerID, nil
+	}
+	return hostID, nil
+}
+
+type setScorerRequest struct {
+	JudgeID int64 `json:"judge_id"`
+}
+
+// SetScorer lets the host decide, after attendance is confirmed, whether
+// they or the co-judge actually enters scores.
+func (h *Round2Handler) SetScorer(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	var req setScorerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	var hostID int64
+	if err := h.Pool.QueryRow(ctx, `SELECT created_by FROM slots WHERE id = $1`, slotID).Scan(&hostID); err != nil {
+		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+	if hostID != uid {
+		http.Error(w, "only the host can choose who scores", http.StatusForbidden)
+		return
+	}
+
+	// req.JudgeID must be the host or one of the co-judges on this slot
+	if req.JudgeID != hostID {
+		var isCoJudge bool
+		h.Pool.QueryRow(ctx, `SELECT true FROM slot_co_judges WHERE slot_id = $1 AND judge_id = $2`, slotID, req.JudgeID).Scan(&isCoJudge)
+		if !isCoJudge {
+			http.Error(w, "judge_id must be the host or a co-judge on this slot", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if _, err := h.Pool.Exec(ctx, `UPDATE slots SET scorer_judge_id = $1 WHERE id = $2`, req.JudgeID, slotID); err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type motionRequest struct {
+	Motion string `json:"motion"`
+}
+
+func (h *Round2Handler) SetMotion(w http.ResponseWriter, r *http.Request) {
+	uid, ok := judgeID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	var req motionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	scorer, err := h.effectiveScorer(ctx, slotID)
+	if err != nil || scorer != uid {
+		http.Error(w, "you are not the designated scorer for this slot", http.StatusForbidden)
+		return
+	}
+	if _, err := h.Pool.Exec(ctx, `UPDATE slots SET motion = $1 WHERE id = $2`, req.Motion, slotID); err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if h.Sheets != nil {
+		go h.syncSlotToSheet(context.Background(), slotID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Round2Handler) syncSlotToSheet(ctx context.Context, slotID int64) {
+	rows, err := h.Pool.Query(ctx, `SELECT id FROM debate_participants WHERE slot_id = $1`, slotID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		h.syncParticipantToSheet(ctx, id)
+	}
 }

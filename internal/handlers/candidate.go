@@ -155,31 +155,30 @@ var _ = strconv.Itoa // placeholder if unused later
 
 type submitUnavailabilityRequest struct {
 	RoundID          int64    `json:"round_id"`
-	UnavailableDates []string `json:"unavailable_dates"` // ["2026-08-16", "2026-08-20"]
+	UnavailableDates []string `json:"unavailable_dates"`
+	Reason           string   `json:"reason"`
 	Note             string   `json:"note,omitempty"`
 }
 
-// SubmitUnavailability lets a candidate flag dates they can't attend for a
-// round, once it's been announced - upserts, so resubmitting replaces their
-// previous answer rather than piling up entries.
+var validReasons = map[string]bool{"Other Commitments": true, "Tests": true, "Other": true, "": true}
+
 func (h *CandidateHandler) SubmitUnavailability(w http.ResponseWriter, r *http.Request) {
 	uid, ok := candidateID(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-
 	var req submitUnavailabilityRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	ctx := r.Context()
-	if blockIfRoundInactive(ctx, h.Pool, w, r, req.RoundID) {
-		return
-	}
 	if len(req.UnavailableDates) == 0 {
 		http.Error(w, "unavailable_dates cannot be empty", http.StatusBadRequest)
+		return
+	}
+	if !validReasons[req.Reason] {
+		http.Error(w, "reason must be Other Commitments, Tests, or Other", http.StatusBadRequest)
 		return
 	}
 	for _, d := range req.UnavailableDates {
@@ -189,14 +188,14 @@ func (h *CandidateHandler) SubmitUnavailability(w http.ResponseWriter, r *http.R
 		}
 	}
 
+	ctx := r.Context()
 	_, err := h.Pool.Exec(ctx, `
-		INSERT INTO candidate_unavailability (candidate_id, round_id, unavailable_dates, note)
-		VALUES ($1, $2, $3, NULLIF($4, ''))
+		INSERT INTO candidate_unavailability (candidate_id, round_id, unavailable_dates, reason, note)
+		VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''))
 		ON CONFLICT (candidate_id, round_id)
-		DO UPDATE SET unavailable_dates = EXCLUDED.unavailable_dates,
-		              note = EXCLUDED.note,
-		              submitted_at = now()
-	`, uid, req.RoundID, req.UnavailableDates, req.Note)
+		DO UPDATE SET unavailable_dates = EXCLUDED.unavailable_dates, reason = EXCLUDED.reason,
+		              note = EXCLUDED.note, submitted_at = now()
+	`, uid, req.RoundID, req.UnavailableDates, req.Reason, req.Note)
 	if err != nil {
 		http.Error(w, "failed to save: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -205,23 +204,22 @@ func (h *CandidateHandler) SubmitUnavailability(w http.ResponseWriter, r *http.R
 	if h.Sheets != nil {
 		go h.syncUnavailabilityToSheet(context.Background(), uid, req.RoundID)
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *CandidateHandler) syncUnavailabilityToSheet(ctx context.Context, candidateID, roundID int64) {
-	var name, email, note string
+	var name, email, note, reason string
 	var dates []string
 	var roundNumber int16
 	var submittedAt time.Time
 
 	err := h.Pool.QueryRow(ctx, `
-		SELECT COALESCE(u.name, ''), u.campus_email, cu.unavailable_dates::text[], COALESCE(cu.note, ''), ro.number, cu.submitted_at
+		SELECT COALESCE(u.name, ''), u.campus_email, cu.unavailable_dates::text[], COALESCE(cu.note, ''), ro.number, cu.submitted_at, COALESCE(cu.reason, '')
 		FROM candidate_unavailability cu
 		JOIN users u ON u.id = cu.candidate_id
 		JOIN rounds ro ON ro.id = cu.round_id
 		WHERE cu.candidate_id = $1 AND cu.round_id = $2
-	`, candidateID, roundID).Scan(&name, &email, &dates, &note, &roundNumber, &submittedAt)
+	`, candidateID, roundID).Scan(&name, &email, &dates, &note, &roundNumber, &submittedAt, &reason)
 	if err != nil {
 		return
 	}
@@ -245,7 +243,7 @@ func (h *CandidateHandler) MyUnavailability(w http.ResponseWriter, r *http.Reque
 	}
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT ro.number, cu.unavailable_dates::text[], COALESCE(cu.note, ''), cu.submitted_at
+		SELECT ro.number, cu.unavailable_dates::text[], COALESCE(cu.note, ''), cu.submitted_at, COALESCE(cu.reason, '')
 		FROM candidate_unavailability cu
 		JOIN rounds ro ON ro.id = cu.round_id
 		WHERE cu.candidate_id = $1
@@ -262,12 +260,13 @@ func (h *CandidateHandler) MyUnavailability(w http.ResponseWriter, r *http.Reque
 		Dates       []string  `json:"unavailable_dates"`
 		Note        string    `json:"note"`
 		SubmittedAt time.Time `json:"submitted_at"`
+		Reason      string    `json:"reason"`
 	}
 
 	results := []view{}
 	for rows.Next() {
 		var v view
-		if err := rows.Scan(&v.RoundNumber, &v.Dates, &v.Note, &v.SubmittedAt); err != nil {
+		if err := rows.Scan(&v.RoundNumber, &v.Dates, &v.Note, &v.SubmittedAt, &v.Reason); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}

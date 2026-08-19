@@ -794,7 +794,7 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 	}
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT COALESCE(u.name,''), u.campus_email, cu.unavailable_dates::text[], COALESCE(cu.note, ''), cu.submitted_at
+		SELECT COALESCE(u.name,''), u.campus_email, cu.unavailable_dates::text[], COALESCE(cu.note, ''), cu.submitted_at, COALESCE(cu.reason, '')
 		FROM candidate_unavailability cu
 		JOIN users u ON u.id = cu.candidate_id
 		WHERE cu.round_id = $1 AND u.is_active = true
@@ -811,13 +811,14 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 		CandidateEmail string    `json:"candidate_email"`
 		Dates          []string  `json:"unavailable_dates"`
 		Note           string    `json:"note"`
+		Reason         string    `json:"reason"`
 		SubmittedAt    time.Time `json:"submitted_at"`
 	}
 
 	results := []view{}
 	for rows.Next() {
 		var v view
-		if err := rows.Scan(&v.CandidateName, &v.CandidateEmail, &v.Dates, &v.Note, &v.SubmittedAt); err != nil {
+		if err := rows.Scan(&v.CandidateName, &v.CandidateEmail, &v.Dates, &v.Note, &v.SubmittedAt, &v.Reason); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}
@@ -1436,6 +1437,72 @@ func (h *AdminHandler) ReassignSlotJudge(w http.ResponseWriter, r *http.Request)
 	}
 	if err != nil {
 		http.Error(w, "reassign failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type slotJudgeInfo struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+func (h *AdminHandler) SlotJudges(w http.ResponseWriter, r *http.Request) {
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+
+	var host slotJudgeInfo
+	if err := h.Pool.QueryRow(r.Context(), `
+		SELECT s.created_by, COALESCE(u.name, u.campus_email, '')
+		FROM slots s JOIN users u ON u.id = s.created_by WHERE s.id = $1
+	`, slotID).Scan(&host.ID, &host.Name); err != nil {
+		http.Error(w, "slot not found", http.StatusNotFound)
+		return
+	}
+
+	rows, err := h.Pool.Query(r.Context(), `
+		SELECT cj.judge_id, COALESCE(u.name, u.campus_email, '')
+		FROM slot_co_judges cj JOIN users u ON u.id = cj.judge_id
+		WHERE cj.slot_id = $1
+	`, slotID)
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	coJudges := []slotJudgeInfo{}
+	for rows.Next() {
+		var j slotJudgeInfo
+		if err := rows.Scan(&j.ID, &j.Name); err != nil {
+			http.Error(w, "scan failed", http.StatusInternalServerError)
+			return
+		}
+		coJudges = append(coJudges, j)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"host": host, "co_judges": coJudges})
+}
+
+func (h *AdminHandler) MarkR3JudgePresent(w http.ResponseWriter, r *http.Request) {
+	slotID, err := strconv.ParseInt(chi.URLParam(r, "slotID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid slot id", http.StatusBadRequest)
+		return
+	}
+	judgeIDParam, err := strconv.ParseInt(chi.URLParam(r, "judgeID"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid judge id", http.StatusBadRequest)
+		return
+	}
+	tag, err := h.Pool.Exec(r.Context(), `
+		UPDATE slot_co_judges SET host_marked_present = true WHERE slot_id = $1 AND judge_id = $2
+	`, slotID, judgeIDParam)
+	if err != nil || tag.RowsAffected() == 0 {
+		http.Error(w, "judge not found on this slot", http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

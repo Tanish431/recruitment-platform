@@ -134,9 +134,21 @@ func (h *EvaluationHandler) Claim(w http.ResponseWriter, r *http.Request) {
 
 	role, _ = r.Context().Value(appmiddleware.UserRoleKey).(string)
 
-	if roundNumber == 3 && role != "admin" {
-		http.Error(w, "only admin scores in round 3 — judges are present as bias-check observers only", http.StatusForbidden)
-		return
+	if roundNumber == 3 {
+		if role != "admin" {
+			http.Error(w, "only admin scores in round 3 — judges are present as bias-check observers only", http.StatusForbidden)
+			return
+		}
+		var slotID int64
+		h.Pool.QueryRow(r.Context(), `SELECT slot_id FROM evaluations WHERE id = $1`, id).Scan(&slotID)
+		var total, present int
+		h.Pool.QueryRow(r.Context(), `
+			SELECT count(*), count(*) FILTER (WHERE host_marked_present) FROM slot_co_judges WHERE slot_id = $1
+		`, slotID).Scan(&total, &present)
+		if total < 2 || present < 2 {
+			http.Error(w, "both observing judges must join and be marked present before scoring", http.StatusForbidden)
+			return
+		}
 	}
 
 	tag, err := h.Pool.Exec(r.Context(), `
@@ -157,7 +169,10 @@ func (h *EvaluationHandler) Claim(w http.ResponseWriter, r *http.Request) {
 type submitRequest struct {
 	Score    int    `json:"score"`
 	Comments string `json:"comments"`
+	Motion   string `json:"motion"`
 }
+
+var validMotions = map[string]bool{"Motion 1": true, "Motion 2": true, "Motion 3": true, "": true}
 
 // Submit finalizes an interview the requesting judge is currently running.
 func (h *EvaluationHandler) Submit(w http.ResponseWriter, r *http.Request) {
@@ -181,15 +196,17 @@ func (h *EvaluationHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "score must be between 1 and 5", http.StatusBadRequest)
 		return
 	}
+	if !validMotions[req.Motion] {
+		http.Error(w, "motion must be Motion 1, Motion 2, or Motion 3", http.StatusBadRequest)
+		return
+	}
+
 	tag, err := h.Pool.Exec(r.Context(), `
 		UPDATE evaluations
-		SET status = 'completed',
-		    score = $1,
-		    comments = $2,
-		    completed_at = now(),
-		    duration_seconds = EXTRACT(EPOCH FROM (now() - started_at))::int
-		WHERE id = $3 AND status = 'in_progress' AND judge_id = $4
-	`, req.Score, req.Comments, id, uid)
+		SET status = 'completed', score = $1, comments = $2, motion = $3,
+		    completed_at = now(), duration_seconds = EXTRACT(EPOCH FROM (now() - started_at))::int
+		WHERE id = $4 AND status = 'in_progress' AND judge_id = $5
+	`, req.Score, req.Comments, req.Motion, id, uid)
 	if err != nil {
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
@@ -273,17 +290,18 @@ func (h *EvaluationHandler) syncToSheet(ctx context.Context, evaluationID int64)
 	var startTime time.Time
 	var score *int
 	var comments *string
+	var motion *string
 	var roundNumber int16
 
 	err := h.Pool.QueryRow(ctx, `
-		SELECT COALESCE(u.name, ''), u.campus_email, l.name, s.start_time, ro.number, e.status, e.score, e.comments
+		SELECT COALESCE(u.name, ''), u.campus_email, l.name, s.start_time, ro.number, e.status, e.score, e.comments, COALESCE(e.motion,'')
 		FROM evaluations e
 		JOIN users u ON u.id = e.candidate_id
 		JOIN slots s ON s.id = e.slot_id
 		JOIN locations l ON l.id = s.location_id
 		JOIN rounds ro ON ro.id = s.round_id
 		WHERE e.id = $1
-	`, evaluationID).Scan(&name, &email, &locationName, &startTime, &roundNumber, &status, &score, &comments)
+	`, evaluationID).Scan(&name, &email, &locationName, &startTime, &roundNumber, &status, &score, &comments, &motion)
 	if err != nil {
 		return
 	}
@@ -300,7 +318,7 @@ func (h *EvaluationHandler) syncToSheet(ctx context.Context, evaluationID int64)
 	tab := fmt.Sprintf("Round%d", roundNumber)
 	row := []interface{}{
 		name, email, locationName, startTime.Format(time.RFC3339),
-		status, scoreStr, ratingsStr, commentsStr, time.Now().Format(time.RFC3339),
+		status, scoreStr, motion, ratingsStr, commentsStr, time.Now().Format(time.RFC3339),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, tab, "B", email, row)
 }
