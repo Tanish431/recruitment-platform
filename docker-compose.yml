@@ -55,7 +55,7 @@ services:
 
   frontend:
     build:
-      context: ./recruitment-frontend
+      context: ../recruitment-frontend
       dockerfile: Dockerfile.frontend
       args:
         NEXT_PUBLIC_API_URL: https://api.${DOMAIN}
