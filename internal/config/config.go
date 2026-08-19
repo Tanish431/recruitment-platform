@@ -18,6 +18,9 @@ type Config struct {
 	SheetsCredentialsPath string
 	GoogleSheetID         string
 	FrontendURL           string
+	CookieDomain          string
+	CookieSecure          bool
+	CORSOrigin            string
 }
 
 func Load() (*Config, error) {
@@ -34,6 +37,9 @@ func Load() (*Config, error) {
 		SheetsCredentialsPath: os.Getenv("GOOGLE_SHEETS_CREDENTIALS_PATH"),
 		GoogleSheetID:         os.Getenv("GOOGLE_SHEET_ID"),
 		FrontendURL:           os.Getenv("FRONTEND_URL"),
+		CookieDomain:          getEnv("COOKIE_DOMAIN", ""),
+		CookieSecure:          getEnv("COOKIE_SECURE", "false") == "true",
+		CORSOrigin:            getEnv("CORS_ORIGIN", "http://localhost:3000"),
 	}
 
 	if cfg.DatabaseURL == "" {

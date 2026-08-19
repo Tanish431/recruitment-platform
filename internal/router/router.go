@@ -18,7 +18,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+			w.Header().Set("Access-Control-Allow-Origin", cfg.CORSOrigin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -34,7 +34,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 	r.Use(appmiddleware.Logging)
 
 	oauthCfg := auth.NewOAuthConfig(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL)
-	authHandler := handlers.NewAuthHandler(pool, oauthCfg, cfg.AllowedEmailDomain, cfg.FrontendURL, sheetsClient)
+	authHandler := handlers.NewAuthHandler(pool, oauthCfg, cfg.AllowedEmailDomain, cfg.FrontendURL, sheetsClient, cfg.CookieDomain, cfg.CookieSecure, cfg.CORSOrigin)
 	authMW := appmiddleware.NewAuthMiddleware(pool)
 
 	adminHandler := handlers.NewAdminHandler(pool, cfg.AllowedEmailDomain, sheetsClient)

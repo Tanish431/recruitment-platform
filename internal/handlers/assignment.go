@@ -418,7 +418,7 @@ func (h *AssignmentHandler) reconcileUnavailability(ctx context.Context, roundID
 
 	openRows, err := h.Pool.Query(ctx, `
 		SELECT id, start_time, capacity - filled_count FROM slots
-		WHERE round_id = $1 AND is_buffer = false AND capacity > filled_count
+		WHERE round_id = $1 AND capacity > filled_count
 		ORDER BY start_time
 	`, roundID)
 	if err != nil {

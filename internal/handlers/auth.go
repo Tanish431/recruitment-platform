@@ -31,15 +31,21 @@ type AuthHandler struct {
 	AllowedDomain string
 	FrontendURL   string
 	Sheets        *sheets.Client
+	CookieDomain  string
+	CookieSecure  bool
+	CORSOrigin    string
 }
 
-func NewAuthHandler(pool *pgxpool.Pool, oauthCfg *oauth2.Config, allowedDomain, frontendURL string, sheets *sheets.Client) *AuthHandler {
+func NewAuthHandler(pool *pgxpool.Pool, oauthCfg *oauth2.Config, allowedDomain, frontendURL string, sheets *sheets.Client, cookieDomain string, cookieSecure bool, corsOrigin string) *AuthHandler {
 	return &AuthHandler{
 		Pool:          pool,
 		OAuthCfg:      oauthCfg,
 		AllowedDomain: allowedDomain,
 		FrontendURL:   frontendURL,
 		Sheets:        sheets,
+		CookieDomain:  cookieDomain,
+		CookieSecure:  cookieSecure,
+		CORSOrigin:    corsOrigin,
 	}
 }
 
@@ -63,6 +69,8 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Name:     stateCookieName,
 		Value:    state,
 		Path:     "/",
+		Domain:   h.CookieDomain,
+		Secure:   h.CookieSecure,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   300, // 5 min, enough time to complete the consent flow
@@ -135,13 +143,15 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Name:     sessionCookieName,
 		Value:    sessionID,
 		Path:     "/",
+		Domain:   h.CookieDomain,
+		Secure:   h.CookieSecure,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
 
 	// clear the now-consumed state cookie
-	http.SetCookie(w, &http.Cookie{Name: stateCookieName, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: stateCookieName, Value: "", Path: "/", Domain: h.CookieDomain, Secure: h.CookieSecure, MaxAge: -1})
 
 	dest := h.FrontendURL + "/dashboard"
 	if user.Phone == "" || user.WhatsApp == "" {
@@ -264,6 +274,6 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		h.Pool.Exec(r.Context(), `DELETE FROM sessions WHERE id = $1`, cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", Domain: h.CookieDomain, Secure: h.CookieSecure, MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
