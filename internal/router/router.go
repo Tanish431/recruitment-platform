@@ -44,6 +44,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 	candidateHandler := handlers.NewCandidateHandler(pool, sheetsClient)
 	queryHandler := handlers.NewQueryHandler(pool, sheetsClient)
 	propertyHandler := handlers.NewPropertyHandler(pool)
+	resultsHandler := handlers.NewResultsHandler(pool)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -110,6 +111,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Delete("/properties/{propertyID}", propertyHandler.DeleteProperty)
 		r.Post("/slots/{slotID}/reassign-judge", adminHandler.ReassignSlotJudge)
 		r.Post("/slots/{slotID}/judges/{judgeID}/mark-present", adminHandler.MarkR3JudgePresent)
+		r.Get("/rounds/{roundID}/results-table", resultsHandler.CandidateResultsTable)
+		r.Get("/candidates/{candidateID}/summary", resultsHandler.CandidateSummary)
 	})
 
 	// Judge - locked to role=judge or role=admin
