@@ -20,9 +20,10 @@ func NewResultsHandler(pool *pgxpool.Pool) *ResultsHandler {
 type resultsTableRow struct {
 	CandidateID int64            `json:"candidate_id"`
 	Name        string           `json:"name"`
-	Email       string           `json:"email"`
+	BitsID      string           `json:"bits_id"`
+	Phone       string           `json:"phone"`
 	Overall     *int             `json:"overall,omitempty"`
-	Properties  map[int64]string `json:"properties"` // property_id -> "bad"|"meh"|"good"
+	Properties  map[int64]string `json:"properties"`
 }
 
 type resultsTableView struct {
@@ -69,7 +70,7 @@ func (h *ResultsHandler) CandidateResultsTable(w http.ResponseWriter, r *http.Re
 
 	if roundNumber == 2 {
 		dpRows, err := h.Pool.Query(ctx, `
-			SELECT dp.id, dp.candidate_id, COALESCE(u.name,''), u.campus_email, dp.score
+			SELECT dp.id, dp.candidate_id, COALESCE(u.name,''), COALESCE(u.bits_id,''), COALESCE(u.phone,''), dp.score
 			FROM debate_participants dp
 			JOIN users u ON u.id = dp.candidate_id
 			JOIN slots s ON s.id = dp.slot_id
@@ -77,20 +78,20 @@ func (h *ResultsHandler) CandidateResultsTable(w http.ResponseWriter, r *http.Re
 			ORDER BY u.campus_email
 		`, roundID)
 		if err != nil {
-			http.Error(w, "query failed", http.StatusInternalServerError)
+			http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		type dpRow struct{ ParticipantID, CandidateID int64 }
 		var dpList []dpRow
 		for dpRows.Next() {
 			var candidateID int64
-			var name, email string
+			var name, bitsID, phone string
 			var score *int
 			var pid int64
-			if err := dpRows.Scan(&pid, &candidateID, &name, &email, &score); err != nil {
+			if err := dpRows.Scan(&pid, &candidateID, &name, &bitsID, &phone, &score); err != nil {
 				continue
 			}
-			rowsMap[candidateID] = &resultsTableRow{CandidateID: candidateID, Name: name, Email: email, Overall: score, Properties: map[int64]string{}}
+			rowsMap[candidateID] = &resultsTableRow{CandidateID: candidateID, Name: name, BitsID: bitsID, Phone: phone, Overall: score, Properties: map[int64]string{}}
 			order = append(order, candidateID)
 			dpList = append(dpList, dpRow{pid, candidateID})
 		}
@@ -113,7 +114,7 @@ func (h *ResultsHandler) CandidateResultsTable(w http.ResponseWriter, r *http.Re
 		}
 	} else {
 		evRows, err := h.Pool.Query(ctx, `
-			SELECT e.id, e.candidate_id, COALESCE(u.name,''), u.campus_email, e.score
+			SELECT e.id, e.candidate_id, COALESCE(u.name,''), COALESCE(u.bits_id,''), COALESCE(u.phone,''), e.score
 			FROM evaluations e
 			JOIN users u ON u.id = e.candidate_id
 			JOIN slots s ON s.id = e.slot_id
@@ -121,20 +122,20 @@ func (h *ResultsHandler) CandidateResultsTable(w http.ResponseWriter, r *http.Re
 			ORDER BY u.campus_email
 		`, roundID)
 		if err != nil {
-			http.Error(w, "query failed", http.StatusInternalServerError)
+			http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		type evRow struct{ EvaluationID, CandidateID int64 }
 		var evList []evRow
 		for evRows.Next() {
 			var candidateID int64
-			var name, email string
+			var name, bitsID, phone string
 			var score *int
 			var eid int64
-			if err := evRows.Scan(&eid, &candidateID, &name, &email, &score); err != nil {
+			if err := evRows.Scan(&eid, &candidateID, &name, &bitsID, &phone, &score); err != nil {
 				continue
 			}
-			rowsMap[candidateID] = &resultsTableRow{CandidateID: candidateID, Name: name, Email: email, Overall: score, Properties: map[int64]string{}}
+			rowsMap[candidateID] = &resultsTableRow{CandidateID: candidateID, Name: name, BitsID: bitsID, Phone: phone, Overall: score, Properties: map[int64]string{}}
 			order = append(order, candidateID)
 			evList = append(evList, evRow{eid, candidateID})
 		}
@@ -165,9 +166,6 @@ func (h *ResultsHandler) CandidateResultsTable(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(resultsTableView{Properties: properties, Rows: rows})
 }
 
-// CandidateSummary pulls everything about one candidate across every round
-// they've participated in: scores, per-property ratings, comments, motion,
-// and (for round 2) team prep notes from whichever slot they sat in.
 func (h *ResultsHandler) CandidateSummary(w http.ResponseWriter, r *http.Request) {
 	candidateID, err := strconv.ParseInt(chi.URLParam(r, "candidateID"), 10, 64)
 	if err != nil {
@@ -176,36 +174,47 @@ func (h *ResultsHandler) CandidateSummary(w http.ResponseWriter, r *http.Request
 	}
 	ctx := r.Context()
 
-	var name, email string
-	if err := h.Pool.QueryRow(ctx, `SELECT COALESCE(name,''), campus_email FROM users WHERE id = $1`, candidateID).Scan(&name, &email); err != nil {
+	var name, bitsID, phone string
+	if err := h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(name,''), COALESCE(bits_id,''), COALESCE(phone,'') FROM users WHERE id = $1
+	`, candidateID).Scan(&name, &bitsID, &phone); err != nil {
 		http.Error(w, "candidate not found", http.StatusNotFound)
 		return
 	}
 
 	type roundSummary struct {
-		RoundNumber int16             `json:"round_number"`
-		Status      string            `json:"status"`
-		Overall     *int              `json:"overall,omitempty"`
-		Comments    string            `json:"comments"`
-		Motion      string            `json:"motion,omitempty"`
-		Team        string            `json:"team,omitempty"`
-		TeamAPrep   string            `json:"team_a_prep,omitempty"`
-		TeamBPrep   string            `json:"team_b_prep,omitempty"`
-		Properties  map[string]string `json:"properties"` // property name -> rating
+		RoundNumber  int16             `json:"round_number"`
+		Status       string            `json:"status"`
+		Overall      *int              `json:"overall,omitempty"`
+		SpeakerNotes string            `json:"speaker_notes,omitempty"`
+		FinalNotes   string            `json:"final_notes,omitempty"`
+		JudgeName    string            `json:"judge_name,omitempty"`
+		CoJudgeName  string            `json:"co_judge_name,omitempty"`
+		Motion       string            `json:"motion,omitempty"`
+		Team         string            `json:"team,omitempty"`
+		TeamAPrep    string            `json:"team_a_prep,omitempty"`
+		TeamBPrep    string            `json:"team_b_prep,omitempty"`
+		Properties   map[string]string `json:"properties"`
 	}
 	var rounds []roundSummary
 
-	// Round 1 / 3 evaluations
 	evRows, err := h.Pool.Query(ctx, `
-		SELECT e.id, ro.number, e.status, e.score, COALESCE(e.comments,''), COALESCE(e.motion,'')
-		FROM evaluations e JOIN slots s ON s.id = e.slot_id JOIN rounds ro ON ro.id = s.round_id
+		SELECT e.id, ro.number, e.status, e.score,
+		       COALESCE(e.speaker_notes,''), COALESCE(e.final_notes,''), COALESCE(e.co_judge_name,''),
+		       COALESCE(e.motion,''), COALESCE(ju.name, ju.campus_email, '')
+		FROM evaluations e
+		JOIN slots s ON s.id = e.slot_id
+		JOIN rounds ro ON ro.id = s.round_id
+		LEFT JOIN users ju ON ju.id = e.judge_id
 		WHERE e.candidate_id = $1
 	`, candidateID)
 	if err == nil {
 		for evRows.Next() {
 			var rs roundSummary
 			var eid int64
-			evRows.Scan(&eid, &rs.RoundNumber, &rs.Status, &rs.Overall, &rs.Comments, &rs.Motion)
+			if err := evRows.Scan(&eid, &rs.RoundNumber, &rs.Status, &rs.Overall, &rs.SpeakerNotes, &rs.FinalNotes, &rs.CoJudgeName, &rs.Motion, &rs.JudgeName); err != nil {
+				continue
+			}
 			rs.Properties = map[string]string{}
 			pRows, _ := h.Pool.Query(ctx, `
 				SELECT rp.name, epr.rating::text FROM evaluation_property_ratings epr
@@ -223,11 +232,16 @@ func (h *ResultsHandler) CandidateSummary(w http.ResponseWriter, r *http.Request
 		evRows.Close()
 	}
 
-	// Round 2 debate participation
 	dpRows, err := h.Pool.Query(ctx, `
-		SELECT dp.id, dp.team, dp.attendance, dp.score, COALESCE(dp.comments,''),
-		       COALESCE(s.motion,''), COALESCE(s.team_a_prep,''), COALESCE(s.team_b_prep,'')
-		FROM debate_participants dp JOIN slots s ON s.id = dp.slot_id
+		SELECT dp.id, dp.team, dp.attendance, dp.score,
+		       COALESCE(dp.speaker_notes,''), COALESCE(dp.final_notes,''),
+		       COALESCE(s.motion,''), COALESCE(s.team_a_prep,''), COALESCE(s.team_b_prep,''),
+		       COALESCE(hu.name, hu.campus_email, ''), COALESCE(cj.name, cj.campus_email, '')
+		FROM debate_participants dp
+		JOIN slots s ON s.id = dp.slot_id
+		JOIN users hu ON hu.id = s.created_by
+		LEFT JOIN slot_co_judges scj ON scj.slot_id = s.id
+		LEFT JOIN users cj ON cj.id = scj.judge_id
 		WHERE dp.candidate_id = $1
 	`, candidateID)
 	if err == nil {
@@ -235,7 +249,9 @@ func (h *ResultsHandler) CandidateSummary(w http.ResponseWriter, r *http.Request
 			var rs roundSummary
 			var pid int64
 			rs.RoundNumber = 2
-			dpRows.Scan(&pid, &rs.Team, &rs.Status, &rs.Overall, &rs.Comments, &rs.Motion, &rs.TeamAPrep, &rs.TeamBPrep)
+			if err := dpRows.Scan(&pid, &rs.Team, &rs.Status, &rs.Overall, &rs.SpeakerNotes, &rs.FinalNotes, &rs.Motion, &rs.TeamAPrep, &rs.TeamBPrep, &rs.JudgeName, &rs.CoJudgeName); err != nil {
+				continue
+			}
 			rs.Properties = map[string]string{}
 			pRows, _ := h.Pool.Query(ctx, `
 				SELECT rp.name, ppr.rating::text FROM participant_property_ratings ppr
@@ -254,6 +270,6 @@ func (h *ResultsHandler) CandidateSummary(w http.ResponseWriter, r *http.Request
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"candidate_id": candidateID, "name": name, "email": email, "rounds": rounds,
+		"candidate_id": candidateID, "name": name, "bits_id": bitsID, "phone": phone, "rounds": rounds,
 	})
 }

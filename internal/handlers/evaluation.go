@@ -32,15 +32,16 @@ func judgeID(r *http.Request) (int64, bool) {
 }
 
 type queueItem struct {
-	EvaluationID   int64      `json:"evaluation_id"`
-	CandidateID    int64      `json:"candidate_id"`
-	CandidateName  string     `json:"candidate_name"`
-	CandidateEmail string     `json:"candidate_email"`
-	SlotID         int64      `json:"slot_id"`
-	SlotStart      time.Time  `json:"slot_start"`
-	Status         string     `json:"status"`
-	CheckedInAt    *time.Time `json:"checked_in_at,omitempty"`
-	SkipCount      int        `json:"skip_count"`
+	EvaluationID    int64      `json:"evaluation_id"`
+	CandidateID     int64      `json:"candidate_id"`
+	CandidateBitsID string     `json:"candidate_bits_id"`
+	CandidateName   string     `json:"candidate_name"`
+	CandidateEmail  string     `json:"candidate_email"`
+	SlotID          int64      `json:"slot_id"`
+	SlotStart       time.Time  `json:"slot_start"`
+	Status          string     `json:"status"`
+	CheckedInAt     *time.Time `json:"checked_in_at,omitempty"`
+	SkipCount       int        `json:"skip_count"`
 }
 
 func (h *EvaluationHandler) Queue(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +57,7 @@ func (h *EvaluationHandler) Queue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT e.id, e.candidate_id, COALESCE(u.name,''), u.campus_email, e.slot_id, s.start_time,
+		SELECT e.id, e.candidate_id, COALESCE(u.name,''), COALESCE(u.bits_id,''), u.campus_email, e.slot_id, s.start_time,
 		       e.status, e.checked_in_at, e.skip_count
 		FROM evaluations e
 		JOIN slots s ON s.id = e.slot_id
@@ -74,7 +75,7 @@ func (h *EvaluationHandler) Queue(w http.ResponseWriter, r *http.Request) {
 	items := []queueItem{}
 	for rows.Next() {
 		var it queueItem
-		if err := rows.Scan(&it.EvaluationID, &it.CandidateID, &it.CandidateName, &it.CandidateEmail,
+		if err := rows.Scan(&it.EvaluationID, &it.CandidateID, &it.CandidateName, &it.CandidateBitsID, &it.CandidateEmail,
 			&it.SlotID, &it.SlotStart, &it.Status, &it.CheckedInAt, &it.SkipCount); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
@@ -167,14 +168,15 @@ func (h *EvaluationHandler) Claim(w http.ResponseWriter, r *http.Request) {
 }
 
 type submitRequest struct {
-	Score    int    `json:"score"`
-	Comments string `json:"comments"`
-	Motion   string `json:"motion"`
+	Score        int    `json:"score"`
+	SpeakerNotes string `json:"speaker_notes"`
+	FinalNotes   string `json:"final_notes"`
+	CoJudgeID    *int64 `json:"co_judge_id,omitempty"`
+	Motion       string `json:"motion"`
 }
 
 var validMotions = map[string]bool{"Motion 1": true, "Motion 2": true, "Motion 3": true, "": true}
 
-// Submit finalizes an interview the requesting judge is currently running.
 func (h *EvaluationHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	uid, ok := judgeID(r)
 	if !ok {
@@ -203,10 +205,10 @@ func (h *EvaluationHandler) Submit(w http.ResponseWriter, r *http.Request) {
 
 	tag, err := h.Pool.Exec(r.Context(), `
 		UPDATE evaluations
-		SET status = 'completed', score = $1, comments = $2, motion = $3,
+		SET status = 'completed', score = $1, speaker_notes = $2, final_notes = $3, co_judge_id = $4, motion = $5,
 		    completed_at = now(), duration_seconds = EXTRACT(EPOCH FROM (now() - started_at))::int
-		WHERE id = $4 AND status = 'in_progress' AND judge_id = $5
-	`, req.Score, req.Comments, req.Motion, id, uid)
+		WHERE id = $6 AND status = 'in_progress' AND judge_id = $7
+	`, req.Score, req.SpeakerNotes, req.FinalNotes, req.CoJudgeID, req.Motion, id, uid)
 	if err != nil {
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
@@ -215,6 +217,7 @@ func (h *EvaluationHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "evaluation not found, not yours, or not in progress", http.StatusConflict)
 		return
 	}
+
 	if h.Sheets != nil {
 		go h.syncToSheet(context.Background(), id)
 	}
@@ -286,39 +289,44 @@ func (h *EvaluationHandler) syncToSheet(ctx context.Context, evaluationID int64)
 		return
 	}
 
-	var email, name, locationName, status string
+	var email, name, locationName, status, judgeName, coJudgeName, speakerNotes, finalNotes string
 	var startTime time.Time
 	var score *int
-	var comments *string
-	var motion *string
 	var roundNumber int16
 
 	err := h.Pool.QueryRow(ctx, `
-		SELECT COALESCE(u.name, ''), u.campus_email, l.name, s.start_time, ro.number, e.status, e.score, e.comments, COALESCE(e.motion,'')
+		SELECT COALESCE(u.name,''), u.campus_email, l.name, s.start_time, ro.number, e.status, e.score,
+		       COALESCE(e.speaker_notes,''), COALESCE(e.final_notes,''), COALESCE(cj.name, cj.campus_email, ''),
+		       COALESCE(ju.name, ju.campus_email, '')
 		FROM evaluations e
 		JOIN users u ON u.id = e.candidate_id
 		JOIN slots s ON s.id = e.slot_id
 		JOIN locations l ON l.id = s.location_id
 		JOIN rounds ro ON ro.id = s.round_id
+		LEFT JOIN users ju ON ju.id = e.judge_id
+		LEFT JOIN users cj ON cj.id = e.co_judge_id
 		WHERE e.id = $1
-	`, evaluationID).Scan(&name, &email, &locationName, &startTime, &roundNumber, &status, &score, &comments, &motion)
+	`, evaluationID).Scan(&name, &email, &locationName, &startTime, &roundNumber, &status, &score,
+		&speakerNotes, &finalNotes, &coJudgeName, &judgeName)
 	if err != nil {
 		return
 	}
 
-	scoreStr, commentsStr := "", ""
+	scoreStr := ""
 	if score != nil {
 		scoreStr = fmt.Sprint(*score)
 	}
-	if comments != nil {
-		commentsStr = *comments
-	}
+
 	ratingsStr := h.formatPropertyRatings(ctx, "evaluation_property_ratings", "evaluation_id", evaluationID)
+
+	var motion string
+	h.Pool.QueryRow(ctx, `SELECT COALESCE(motion,'') FROM evaluations WHERE id = $1`, evaluationID).Scan(&motion)
 
 	tab := fmt.Sprintf("Round%d", roundNumber)
 	row := []interface{}{
-		name, email, locationName, startTime.Format(time.RFC3339),
-		status, scoreStr, motion, ratingsStr, commentsStr, time.Now().Format(time.RFC3339),
+		name, email, locationName, sheets.FormatSheetTime(startTime),
+		status, scoreStr, motion, judgeName, coJudgeName, ratingsStr, speakerNotes, finalNotes,
+		sheets.FormatSheetTime(time.Now()),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, tab, "B", email, row)
 }
@@ -358,21 +366,23 @@ func (h *EvaluationHandler) LookupByEmail(w http.ResponseWriter, r *http.Request
 	}
 
 	var result struct {
-		EvaluationID int64  `json:"evaluation_id"`
-		CandidateID  int64  `json:"candidate_id"`
-		Status       string `json:"status"`
-		LocationName string `json:"location_name"`
-		SlotStart    string `json:"slot_start"`
+		EvaluationID    int64  `json:"evaluation_id"`
+		CandidateID     int64  `json:"candidate_id"`
+		CandidateName   string `json:"candidate_name"`
+		CandidateBitsID string `json:"candidate_bits_id"`
+		Status          string `json:"status"`
+		LocationName    string `json:"location_name"`
+		SlotStart       string `json:"slot_start"`
 	}
 
 	err = h.Pool.QueryRow(r.Context(), `
-		SELECT e.id, e.candidate_id, e.status, l.name, s.start_time::text
+		SELECT e.id, e.candidate_id, e.status, l.name, s.start_time::text, COALESCE(u.name,''), COALESCE(u.bits_id,'')
 		FROM evaluations e
 		JOIN users u ON u.id = e.candidate_id
 		JOIN slots s ON s.id = e.slot_id
 		JOIN locations l ON l.id = s.location_id
-		WHERE s.round_id = $1 AND u.campus_email = $2 AND u.is_active = true
-	`, roundID, email).Scan(&result.EvaluationID, &result.CandidateID, &result.Status, &result.LocationName, &result.SlotStart)
+		WHERE s.round_id = $1 AND u.campus_email = $2
+	`, roundID, email).Scan(&result.EvaluationID, &result.CandidateID, &result.Status, &result.LocationName, &result.SlotStart, &result.CandidateName, &result.CandidateBitsID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			http.Error(w, "no evaluation found for this candidate in this round", http.StatusNotFound)
@@ -383,4 +393,34 @@ func (h *EvaluationHandler) LookupByEmail(w http.ResponseWriter, r *http.Request
 	}
 
 	json.NewEncoder(w).Encode(result)
+}
+
+type judgeOption struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// ListJudges returns every judge (and admin, since they can also judge) —
+// used to populate the co-judge picker.
+func (h *EvaluationHandler) ListJudges(w http.ResponseWriter, r *http.Request) {
+	uid, _ := judgeID(r)
+	rows, err := h.Pool.Query(r.Context(), `
+		SELECT id, COALESCE(name, campus_email, '') FROM users
+		WHERE role IN ('judge', 'admin') AND id != $1
+		ORDER BY name
+	`, uid)
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	results := []judgeOption{}
+	for rows.Next() {
+		var j judgeOption
+		if err := rows.Scan(&j.ID, &j.Name); err == nil {
+			results = append(results, j)
+		}
+	}
+	json.NewEncoder(w).Encode(results)
 }

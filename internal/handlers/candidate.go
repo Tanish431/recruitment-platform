@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -228,7 +229,7 @@ func (h *CandidateHandler) syncUnavailabilityToSheet(ctx context.Context, candid
 	// on one shared tab without UpsertRow's email-based matching colliding.
 	key := fmt.Sprintf("%s-R%d", name, roundNumber)
 	row := []interface{}{
-		key, name, email, roundNumber, strings.Join(dates, ", "), note, submittedAt.Format(time.RFC3339),
+		key, name, email, roundNumber, strings.Join(dates, ", "), reason, note, sheets.FormatSheetTime(submittedAt),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, "Unavailability", "B", key, row)
 }
@@ -351,5 +352,56 @@ func (h *CandidateHandler) AcknowledgeResult(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+var bitsIDPattern = regexp.MustCompile(`^202\d\w{2}[A-Z]{2}\d{4}P$`)
+
+func (h *CandidateHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	uid, ok := candidateID(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var body struct {
+		Phone    string `json:"phone"`
+		WhatsApp string `json:"whatsapp"`
+		BitsID   string `json:"bits_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Phone == "" || body.WhatsApp == "" {
+		http.Error(w, "phone and whatsapp are both required", http.StatusBadRequest)
+		return
+	}
+	body.BitsID = strings.ToUpper(strings.TrimSpace(body.BitsID))
+	if !bitsIDPattern.MatchString(body.BitsID) {
+		http.Error(w, "BITS ID must match the format e.g. 2021A7PS0072P", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	_, err := h.Pool.Exec(ctx, `
+		UPDATE users SET phone = $1, whatsapp = $2, bits_id = $3 WHERE id = $4
+	`, body.Phone, body.WhatsApp, body.BitsID, uid)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique") {
+			http.Error(w, "this BITS ID is already registered to another account", http.StatusConflict)
+			return
+		}
+		http.Error(w, "failed to update profile", http.StatusInternalServerError)
+		return
+	}
+
+	if h.Sheets != nil {
+		var name, email string
+		h.Pool.QueryRow(ctx, `SELECT COALESCE(name,''), campus_email FROM users WHERE id = $1`, uid).Scan(&name, &email)
+		go h.Sheets.UpsertRowAtColumn(context.Background(), "Sheet1", "B", email,
+			[]interface{}{name, email, body.BitsID, body.Phone, body.WhatsApp})
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -15,6 +15,7 @@ type User struct {
 	ID               int64     `json:"id"`
 	CampusEmail      string    `json:"campus_email"`
 	Name             string    `json:"name"`
+	BitsID           string    `json:"bits_id"`
 	Phone            string    `json:"phone"`
 	WhatsApp         string    `json:"whatsapp"`
 	Role             Role      `json:"role"`

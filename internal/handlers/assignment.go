@@ -365,8 +365,9 @@ func (h *AssignmentHandler) syncAssignmentsToSheets(ctx context.Context, roundNu
 			h.Pool.QueryRow(ctx, `SELECT COALESCE(name, ''), campus_email FROM users WHERE id = $1`, candidateID).Scan(&name, &email)
 
 			row := []interface{}{
-				name, email, locationName, startTime.Format(time.RFC3339),
-				"not_arrived", "", "", time.Now().Format(time.RFC3339),
+				name, email, locationName, sheets.FormatSheetTime(startTime),
+				"not_arrived", "", "", "", "", "", "", "",
+				sheets.FormatSheetTime(time.Now()),
 			}
 			if err := h.Sheets.UpsertRowAtColumn(ctx, tab, "B", email, row); err != nil {
 				fmt.Printf("sheets upsert failed for %s: %v\n", email, err)

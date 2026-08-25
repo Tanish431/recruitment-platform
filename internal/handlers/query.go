@@ -22,23 +22,24 @@ func NewQueryHandler(pool *pgxpool.Pool, sheets *sheets.Client) *QueryHandler {
 }
 
 type pendingQueryView struct {
-	QueryID        int64  `json:"query_id"`
-	AssignmentID   int64  `json:"assignment_id"`
-	SlotID         int64  `json:"slot_id"`
-	CandidateID    int64  `json:"candidate_id"`
-	CandidateName  string `json:"candidate_name"`
-	CandidateEmail string `json:"candidate_email"`
-	Reason         string `json:"reason"`
-	RoundID        int64  `json:"round_id"`
-	RoundNumber    int16  `json:"round_number"`
-	LocationName   string `json:"location_name"`
-	StartTimeISO   string `json:"start_time"`
+	QueryID         int64  `json:"query_id"`
+	AssignmentID    int64  `json:"assignment_id"`
+	SlotID          int64  `json:"slot_id"`
+	CandidateID     int64  `json:"candidate_id"`
+	CandidateName   string `json:"candidate_name"`
+	CandidateBitsID string `json:"candidate_bits_id"`
+	CandidateEmail  string `json:"candidate_email"`
+	Reason          string `json:"reason"`
+	RoundID         int64  `json:"round_id"`
+	RoundNumber     int16  `json:"round_number"`
+	LocationName    string `json:"location_name"`
+	StartTimeISO    string `json:"start_time"`
 }
 
 // ListPending shows every open query for admins to work through.
 func (h *QueryHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT q.id, a.id, a.slot_id, a.candidate_id, COALESCE(u.name,''), u.campus_email, q.reason,
+		SELECT q.id, a.id, a.slot_id, a.candidate_id, COALESCE(u.name,''), COALESCE(u.bits_id,''), u.campus_email, q.reason,
 		       ro.id, ro.number, l.name, s.start_time::text
 		FROM queries q
 		JOIN assignments a ON a.id = q.assignment_id
@@ -60,7 +61,7 @@ func (h *QueryHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		var v pendingQueryView
 		if err := rows.Scan(
 			&v.QueryID, &v.AssignmentID, &v.SlotID, &v.CandidateID,
-			&v.CandidateName, &v.CandidateEmail, &v.Reason,
+			&v.CandidateName, &v.CandidateBitsID, &v.CandidateEmail, &v.Reason,
 			&v.RoundID, &v.RoundNumber, &v.LocationName, &v.StartTimeISO,
 		); err != nil {
 			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
@@ -230,7 +231,7 @@ func (h *QueryHandler) OtherAssignmentsForRound(w http.ResponseWriter, r *http.R
 	excludeAssignmentID, _ := strconv.ParseInt(r.URL.Query().Get("exclude_assignment_id"), 10, 64)
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT a.id, COALESCE(u.name,''), u.campus_email, l.name, s.start_time
+		SELECT a.id, COALESCE(u.name,''), COALESCE(u.bits_id,''), u.campus_email, l.name, s.start_time
 		FROM assignments a
 		JOIN users u ON u.id = a.candidate_id
 		JOIN slots s ON s.id = a.slot_id
@@ -247,6 +248,7 @@ func (h *QueryHandler) OtherAssignmentsForRound(w http.ResponseWriter, r *http.R
 	type av struct {
 		AssignmentID int64     `json:"assignment_id"`
 		Name         string    `json:"candidate_name"`
+		BitsID       string    `json:"candidate_bits_id"`
 		Email        string    `json:"candidate_email"`
 		Location     string    `json:"location_name"`
 		Start        time.Time `json:"start_time"`
@@ -254,7 +256,7 @@ func (h *QueryHandler) OtherAssignmentsForRound(w http.ResponseWriter, r *http.R
 	results := []av{}
 	for rows.Next() {
 		var v av
-		if err := rows.Scan(&v.AssignmentID, &v.Name, &v.Email, &v.Location, &v.Start); err != nil {
+		if err := rows.Scan(&v.AssignmentID, &v.Name, &v.BitsID, &v.Email, &v.Location, &v.Start); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}

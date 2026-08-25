@@ -12,7 +12,7 @@ INSERT INTO rounds (number, name) VALUES (2, 'Round 2 - Debates')
 
 INSERT INTO locations (round_id, name)
 SELECT id, loc.name
-FROM rounds, (VALUES ('Rotunda'), ('FD-1'), ('FD-2'), ('Location D'), ('Location E')) AS loc(name)
+FROM rounds, (VALUES ('Rotunda'), ('FD-1'), ('FD-2')) AS loc(name)
 WHERE rounds.number = 2
 ON CONFLICT DO NOTHING;
 

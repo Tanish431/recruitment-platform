@@ -329,7 +329,7 @@ func (h *AdminHandler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT a.id, a.candidate_id, COALESCE(u.name,''), u.campus_email, a.slot_id, s.start_time,
+		SELECT a.id, a.candidate_id, COALESCE(u.name,''), COALESCE(u.bits_id,''), u.campus_email, a.slot_id, s.start_time,
 		       l.name, a.status, a.team
 		FROM assignments a
 		JOIN users u ON u.id = a.candidate_id
@@ -345,21 +345,22 @@ func (h *AdminHandler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type assignmentBoardView struct {
-		AssignmentID   int64     `json:"assignment_id"`
-		CandidateID    int64     `json:"candidate_id"`
-		CandidateName  string    `json:"candidate_name"`
-		CandidateEmail string    `json:"candidate_email"`
-		SlotID         int64     `json:"slot_id"`
-		SlotStart      time.Time `json:"slot_start"`
-		LocationName   string    `json:"location_name"`
-		Status         string    `json:"status"`
-		Team           *string   `json:"team,omitempty"`
+		AssignmentID    int64     `json:"assignment_id"`
+		CandidateID     int64     `json:"candidate_id"`
+		CandidateName   string    `json:"candidate_name"`
+		CandidateBitsID string    `json:"candidate_bits_id"`
+		CandidateEmail  string    `json:"candidate_email"`
+		SlotID          int64     `json:"slot_id"`
+		SlotStart       time.Time `json:"slot_start"`
+		LocationName    string    `json:"location_name"`
+		Status          string    `json:"status"`
+		Team            *string   `json:"team,omitempty"`
 	}
 
 	results := []assignmentBoardView{}
 	for rows.Next() {
 		var v assignmentBoardView
-		if err := rows.Scan(&v.AssignmentID, &v.CandidateID, &v.CandidateName, &v.CandidateEmail, &v.SlotID,
+		if err := rows.Scan(&v.AssignmentID, &v.CandidateID, &v.CandidateName, &v.CandidateBitsID, &v.CandidateEmail, &v.SlotID,
 			&v.SlotStart, &v.LocationName, &v.Status, &v.Team); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
@@ -389,7 +390,7 @@ func (h *AdminHandler) syncAssignmentToSheet(ctx context.Context, assignmentID i
 	}
 
 	tab := fmt.Sprintf("Round%d", roundNumber)
-	row := []interface{}{name, email, locationName, startTime.Format(time.RFC3339), status, "", "", time.Now().Format(time.RFC3339)}
+	row := []interface{}{name, email, locationName, sheets.FormatSheetTime(startTime), status, "", "", sheets.FormatSheetTime(time.Now())}
 	h.Sheets.UpsertRowAtColumn(ctx, tab, "B", email, row)
 }
 
@@ -794,10 +795,10 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 	}
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT COALESCE(u.name,''), u.campus_email, cu.unavailable_dates::text[], COALESCE(cu.note, ''), cu.submitted_at, COALESCE(cu.reason, '')
+		SELECT COALESCE(u.name,''), COALESCE(u.bits_id,''), u.campus_email, cu.unavailable_dates::text[], COALESCE(cu.note, ''), COALESCE(cu.reason,''), cu.submitted_at
 		FROM candidate_unavailability cu
 		JOIN users u ON u.id = cu.candidate_id
-		WHERE cu.round_id = $1 AND u.is_active = true
+		WHERE cu.round_id = $1
 		ORDER BY u.campus_email
 	`, roundID)
 	if err != nil {
@@ -807,18 +808,19 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 	defer rows.Close()
 
 	type view struct {
-		CandidateName  string    `json:"candidate_name"`
-		CandidateEmail string    `json:"candidate_email"`
-		Dates          []string  `json:"unavailable_dates"`
-		Note           string    `json:"note"`
-		Reason         string    `json:"reason"`
-		SubmittedAt    time.Time `json:"submitted_at"`
+		CandidateName   string    `json:"candidate_name"`
+		CandidateBitsID string    `json:"candidate_bits_id"`
+		CandidateEmail  string    `json:"candidate_email"`
+		Dates           []string  `json:"unavailable_dates"`
+		Note            string    `json:"note"`
+		Reason          string    `json:"reason"`
+		SubmittedAt     time.Time `json:"submitted_at"`
 	}
 
 	results := []view{}
 	for rows.Next() {
 		var v view
-		if err := rows.Scan(&v.CandidateName, &v.CandidateEmail, &v.Dates, &v.Note, &v.SubmittedAt, &v.Reason); err != nil {
+		if err := rows.Scan(&v.CandidateName, &v.CandidateBitsID, &v.CandidateEmail, &v.Dates, &v.Note, &v.SubmittedAt, &v.Reason); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}
@@ -1093,7 +1095,7 @@ func (h *AdminHandler) ListCandidates(w http.ResponseWriter, r *http.Request) {
 	h.Pool.QueryRow(r.Context(), "SELECT count(*) FROM users "+whereClause).Scan(&total)
 
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT id, COALESCE(name,''), campus_email, COALESCE(phone,''), COALESCE(whatsapp,''),
+		SELECT id, COALESCE(name,''), campus_email, COALESCE(bits_id, ''), COALESCE(phone,''), COALESCE(whatsapp,''),
 		       COALESCE(round1_result::text,''), COALESCE(round2_result::text,'')
 		FROM users `+whereClause+`
 		ORDER BY campus_email
@@ -1109,6 +1111,7 @@ func (h *AdminHandler) ListCandidates(w http.ResponseWriter, r *http.Request) {
 		ID           int64  `json:"id"`
 		Name         string `json:"name"`
 		Email        string `json:"email"`
+		BitsID       string `json:"bits_id"`
 		Phone        string `json:"phone"`
 		WhatsApp     string `json:"whatsapp"`
 		Round1Result string `json:"round1_result"`
@@ -1117,7 +1120,7 @@ func (h *AdminHandler) ListCandidates(w http.ResponseWriter, r *http.Request) {
 	list := []cv{}
 	for rows.Next() {
 		var v cv
-		if err := rows.Scan(&v.ID, &v.Name, &v.Email, &v.Phone, &v.WhatsApp, &v.Round1Result, &v.Round2Result); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Email, &v.BitsID, &v.Phone, &v.WhatsApp, &v.Round1Result, &v.Round2Result); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}
@@ -1195,7 +1198,7 @@ func (h *AdminHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	idx := 1
 	if q != "" {
-		query += fmt.Sprintf(" AND (campus_email ILIKE $%d OR COALESCE(name,'') ILIKE $%d)", idx, idx)
+		query += fmt.Sprintf(" AND (campus_email ILIKE $%d OR COALESCE(name,'') ILIKE $%d OR COALESCE(bits_id,'') ILIKE $%d)", idx, idx, idx)
 		args = append(args, "%"+q+"%")
 		idx++
 	}

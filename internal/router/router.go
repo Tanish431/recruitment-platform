@@ -43,7 +43,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 	round2Handler := handlers.NewRound2Handler(pool, sheetsClient)
 	candidateHandler := handlers.NewCandidateHandler(pool, sheetsClient)
 	queryHandler := handlers.NewQueryHandler(pool, sheetsClient)
-	propertyHandler := handlers.NewPropertyHandler(pool)
+	propertyHandler := handlers.NewPropertyHandler(pool, sheetsClient)
 	resultsHandler := handlers.NewResultsHandler(pool)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +137,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool, sheetsClient *sheets.Client) ht
 		r.Post("/slots/{slotID}/motion", round2Handler.SetMotion)
 		// Round 1 / 3 - live queue
 		r.Get("/queue", evalHandler.Queue)
+		r.Get("/judges/list", evalHandler.ListJudges)
 		r.Post("/evaluations/{id}/checkin", evalHandler.CheckIn)
 		r.Post("/evaluations/{id}/claim", evalHandler.Claim)
 		r.Post("/evaluations/{id}/submit", evalHandler.Submit)

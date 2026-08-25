@@ -44,7 +44,7 @@ func (c *Client) AppendRow(ctx context.Context, tabName string, row []interface{
 // LogEvent stays append-only - used for the query/swap audit trail, where
 // history matters more than "current state."
 func (c *Client) LogEvent(ctx context.Context, tabName, candidateEmail, eventType string, details ...interface{}) error {
-	row := []interface{}{time.Now().Format(time.RFC3339), candidateEmail, eventType}
+	row := []interface{}{FormatSheetTime(time.Now()), candidateEmail, eventType}
 	row = append(row, details...)
 	return c.AppendRow(ctx, tabName, row)
 }
@@ -84,4 +84,12 @@ func (c *Client) UpsertRowAtColumn(ctx context.Context, tabName, keyColumn, keyV
 		Context(ctx).
 		Do()
 	return err
+}
+
+func FormatSheetTime(t time.Time) string {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format("02 Jan 2006, 3:04 PM MST")
 }

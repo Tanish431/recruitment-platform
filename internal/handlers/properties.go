@@ -1,20 +1,27 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Tanish431/recruitment-platform/internal/sheets"
 )
 
 type PropertyHandler struct {
-	Pool *pgxpool.Pool
+	Pool   *pgxpool.Pool
+	Sheets *sheets.Client
 }
 
-func NewPropertyHandler(pool *pgxpool.Pool) *PropertyHandler {
-	return &PropertyHandler{Pool: pool}
+func NewPropertyHandler(pool *pgxpool.Pool, sheetsClient *sheets.Client) *PropertyHandler {
+	return &PropertyHandler{Pool: pool, Sheets: sheetsClient}
 }
 
 type propertyView struct {
@@ -131,6 +138,9 @@ func (h *PropertyHandler) RateEvaluationProperty(w http.ResponseWriter, r *http.
 		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if h.Sheets != nil {
+		go h.syncEvaluationToSheet(context.Background(), evaluationID)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -184,6 +194,9 @@ func (h *PropertyHandler) RateParticipantProperty(w http.ResponseWriter, r *http
 		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if h.Sheets != nil {
+		go h.syncParticipantToSheet(context.Background(), participantID)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -210,4 +223,128 @@ func (h *PropertyHandler) ParticipantRatings(w http.ResponseWriter, r *http.Requ
 		result[pid] = rating
 	}
 	json.NewEncoder(w).Encode(result)
+}
+
+func (h *PropertyHandler) formatPropertyRatings(ctx context.Context, table, fkCol string, id int64) string {
+	rows, err := h.Pool.Query(ctx, fmt.Sprintf(`
+		SELECT rp.name, t.rating::text FROM %s t
+		JOIN round_scoring_properties rp ON rp.id = t.property_id
+		WHERE t.%s = $1 ORDER BY rp.position
+	`, table, fkCol), id)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var parts []string
+	for rows.Next() {
+		var name, rating string
+		rows.Scan(&name, &rating)
+		parts = append(parts, name+": "+rating)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (h *PropertyHandler) syncEvaluationToSheet(ctx context.Context, evaluationID int64) {
+	if h.Sheets == nil {
+		return
+	}
+
+	var email, name, locationName, status, judgeName, coJudgeName, speakerNotes, finalNotes string
+	var startTime time.Time
+	var score *int
+	var roundNumber int16
+
+	err := h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(u.name,''), u.campus_email, l.name, s.start_time, ro.number, e.status, e.score,
+		       COALESCE(e.speaker_notes,''), COALESCE(e.final_notes,''), COALESCE(e.co_judge_name,''),
+		       COALESCE(ju.name, ju.campus_email, '')
+		FROM evaluations e
+		JOIN users u ON u.id = e.candidate_id
+		JOIN slots s ON s.id = e.slot_id
+		JOIN locations l ON l.id = s.location_id
+		JOIN rounds ro ON ro.id = s.round_id
+		LEFT JOIN users ju ON ju.id = e.judge_id
+		WHERE e.id = $1
+	`, evaluationID).Scan(&name, &email, &locationName, &startTime, &roundNumber, &status, &score,
+		&speakerNotes, &finalNotes, &coJudgeName, &judgeName)
+	if err != nil {
+		return
+	}
+
+	scoreStr := ""
+	if score != nil {
+		scoreStr = fmt.Sprint(*score)
+	}
+	ratingsStr := h.formatPropertyRatings(ctx, "evaluation_property_ratings", "evaluation_id", evaluationID)
+
+	tab := fmt.Sprintf("Round%d", roundNumber)
+	row := []interface{}{
+		name, email, locationName, sheets.FormatSheetTime(startTime),
+		status, scoreStr, h.getMotion(ctx, evaluationID), judgeName, coJudgeName, ratingsStr, speakerNotes, finalNotes,
+		sheets.FormatSheetTime(time.Now()),
+	}
+	h.Sheets.UpsertRowAtColumn(ctx, tab, "B", email, row)
+}
+
+func (h *PropertyHandler) syncParticipantToSheet(ctx context.Context, participantID int64) {
+	if h.Sheets == nil {
+		return
+	}
+
+	var email, name, locationName, team, attendance, speakerNotes, finalNotes string
+	var startTime time.Time
+	var score *int
+	var slotID int64
+	var teamAPrep, teamBPrep string
+
+	err := h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(u.name,''), u.campus_email, l.name, s.start_time, dp.team, dp.attendance, dp.score,
+		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, ''), COALESCE(dp.speaker_notes,''), COALESCE(dp.final_notes,''), dp.slot_id
+		FROM debate_participants dp
+		JOIN users u ON u.id = dp.candidate_id
+		JOIN slots s ON s.id = dp.slot_id
+		JOIN locations l ON l.id = s.location_id
+		WHERE dp.id = $1
+	`, participantID).Scan(&name, &email, &locationName, &startTime, &team, &attendance, &score, &teamAPrep, &teamBPrep,
+		&speakerNotes, &finalNotes, &slotID)
+	if err != nil {
+		return
+	}
+
+	var hostName, coJudgeName, motion string
+	h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(hu.name, hu.campus_email, ''), COALESCE(s.motion,'')
+		FROM slots s JOIN users hu ON hu.id = s.created_by WHERE s.id = $1
+	`, slotID).Scan(&hostName, &motion)
+	h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(u.name, u.campus_email, '') FROM slot_co_judges cj JOIN users u ON u.id = cj.judge_id WHERE cj.slot_id = $1
+	`, slotID).Scan(&coJudgeName)
+
+	scoreStr := ""
+	if score != nil {
+		scoreStr = fmt.Sprint(*score)
+	}
+
+	ratingsStr := h.formatPropertyRatings(ctx, "participant_property_ratings", "participant_id", participantID)
+
+	visibleTeamAPrep := ""
+	visibleTeamBPrep := ""
+	if team == "A" {
+		visibleTeamAPrep = teamAPrep
+	} else if team == "B" {
+		visibleTeamBPrep = teamBPrep
+	}
+
+	row := []interface{}{
+		name, email, locationName, sheets.FormatSheetTime(startTime), team,
+		visibleTeamAPrep, visibleTeamBPrep, motion, attendance, scoreStr, ratingsStr, hostName, coJudgeName, speakerNotes, finalNotes,
+		sheets.FormatSheetTime(time.Now()),
+	}
+	h.Sheets.UpsertRowAtColumn(ctx, "Round2", "B", email, row)
+}
+
+func (h *PropertyHandler) getMotion(ctx context.Context, evaluationID int64) string {
+	var motion string
+	_ = h.Pool.QueryRow(ctx, `SELECT COALESCE(motion,'') FROM evaluations WHERE id = $1`, evaluationID).Scan(&motion)
+	return motion
 }

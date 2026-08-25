@@ -459,7 +459,7 @@ func (h *Round2Handler) Participants(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.Pool.Query(ctx, `
-		SELECT dp.id, dp.candidate_id, COALESCE(u.name,''), u.campus_email, dp.team, dp.attendance, dp.score, dp.comments
+		SELECT dp.id, dp.candidate_id, COALESCE(u.name,''), COALESCE(u.bits_id,''), u.campus_email, dp.team, dp.attendance, dp.score, dp.comments
 		FROM debate_participants dp
 		JOIN users u ON u.id = dp.candidate_id
 		WHERE dp.slot_id = $1
@@ -472,20 +472,21 @@ func (h *Round2Handler) Participants(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type participantView struct {
-		ID             int64   `json:"id"`
-		CandidateID    int64   `json:"candidate_id"`
-		CandidateName  string  `json:"candidate_name"`
-		CandidateEmail string  `json:"candidate_email"`
-		Team           string  `json:"team"`
-		Attendance     string  `json:"attendance"`
-		Score          *int    `json:"score,omitempty"`
-		Comments       *string `json:"comments,omitempty"`
+		ID              int64   `json:"id"`
+		CandidateID     int64   `json:"candidate_id"`
+		CandidateName   string  `json:"candidate_name"`
+		CandidateBitsID string  `json:"candidate_bits_id"`
+		CandidateEmail  string  `json:"candidate_email"`
+		Team            string  `json:"team"`
+		Attendance      string  `json:"attendance"`
+		Score           *int    `json:"score,omitempty"`
+		Comments        *string `json:"comments,omitempty"`
 	}
 
 	participants := []participantView{}
 	for rows.Next() {
 		var p participantView
-		if err := rows.Scan(&p.ID, &p.CandidateID, &p.CandidateName, &p.CandidateEmail, &p.Team, &p.Attendance, &p.Score, &p.Comments); err != nil {
+		if err := rows.Scan(&p.ID, &p.CandidateID, &p.CandidateName, &p.CandidateBitsID, &p.CandidateEmail, &p.Team, &p.Attendance, &p.Score, &p.Comments); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}
@@ -545,8 +546,9 @@ func (h *Round2Handler) SetAttendance(w http.ResponseWriter, r *http.Request) {
 }
 
 type scoreRequest struct {
-	Score    int    `json:"score"`
-	Comments string `json:"comments"`
+	Score        int    `json:"score"`
+	SpeakerNotes string `json:"speaker_notes"`
+	FinalNotes   string `json:"final_notes"`
 }
 
 func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
@@ -580,9 +582,9 @@ func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tag, err := h.Pool.Exec(ctx, `
-		UPDATE debate_participants SET score = $1, comments = $2, submitted_at = now()
-		WHERE id = $3 AND attendance = 'present'
-	`, req.Score, req.Comments, id)
+		UPDATE debate_participants SET score = $1, speaker_notes = $2, final_notes = $3, submitted_at = now()
+		WHERE id = $4 AND attendance = 'present'
+	`, req.Score, req.SpeakerNotes, req.FinalNotes, id)
 	if err != nil {
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
@@ -591,6 +593,7 @@ func (h *Round2Handler) SetScore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "participant not found or not marked present", http.StatusForbidden)
 		return
 	}
+
 	if h.Sheets != nil {
 		go h.syncParticipantToSheet(context.Background(), id)
 	}
@@ -604,34 +607,41 @@ func (h *Round2Handler) syncParticipantToSheet(ctx context.Context, participantI
 		return
 	}
 
-	var name, email, locationName, team, attendance string
+	var email, name, locationName, team, attendance, speakerNotes, finalNotes string
 	var startTime time.Time
 	var score *int
-	var comments *string
-	var teamAPrep, teamBPrep, motion string
+	var slotID int64
+	var teamAPrep, teamBPrep string
 
 	err := h.Pool.QueryRow(ctx, `
-		SELECT COALESCE(u.name, ''), u.campus_email, l.name, s.start_time, dp.team, dp.attendance, dp.score, dp.comments,
-		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, ''), COALESCE(s.motion, '')
+		SELECT COALESCE(u.name,''), u.campus_email, l.name, s.start_time, dp.team, dp.attendance, dp.score,
+		       COALESCE(s.team_a_prep, ''), COALESCE(s.team_b_prep, '') ,COALESCE(dp.speaker_notes,''), COALESCE(dp.final_notes,''), dp.slot_id
 		FROM debate_participants dp
 		JOIN users u ON u.id = dp.candidate_id
 		JOIN slots s ON s.id = dp.slot_id
 		JOIN locations l ON l.id = s.location_id
 		WHERE dp.id = $1
-	`, participantID).Scan(&name, &email, &locationName, &startTime, &team, &attendance, &score, &comments, &teamAPrep, &teamBPrep, &motion)
+	`, participantID).Scan(&name, &email, &locationName, &startTime, &team, &attendance, &score, &teamAPrep, &teamBPrep,
+		&speakerNotes, &finalNotes, &slotID)
 	if err != nil {
 		return
 	}
 
-	scoreStr, commentsStr := "", ""
+	var hostName, coJudgeName, motion string
+	h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(hu.name, hu.campus_email, ''), COALESCE(s.motion,'')
+		FROM slots s JOIN users hu ON hu.id = s.created_by WHERE s.id = $1
+	`, slotID).Scan(&hostName, &motion)
+	h.Pool.QueryRow(ctx, `
+		SELECT COALESCE(u.name, u.campus_email, '') FROM slot_co_judges cj JOIN users u ON u.id = cj.judge_id WHERE cj.slot_id = $1
+	`, slotID).Scan(&coJudgeName)
+
+	scoreStr := ""
 	if score != nil {
 		scoreStr = fmt.Sprint(*score)
 	}
-	if comments != nil {
-		commentsStr = *comments
-	}
 
-	ratingsStr := h.formatPropertyRatings(ctx, "participant_property_ratings", "evaluation_id", participantID)
+	ratingsStr := h.formatPropertyRatings(ctx, "participant_property_ratings", "participant_id", participantID)
 
 	visibleTeamAPrep := ""
 	visibleTeamBPrep := ""
@@ -642,9 +652,9 @@ func (h *Round2Handler) syncParticipantToSheet(ctx context.Context, participantI
 	}
 
 	row := []interface{}{
-		name, email, locationName, startTime.Format(time.RFC3339), team,
-		visibleTeamAPrep, visibleTeamBPrep, motion, attendance, scoreStr, ratingsStr, commentsStr,
-		time.Now().Format(time.RFC3339),
+		name, email, locationName, sheets.FormatSheetTime(startTime), team,
+		visibleTeamAPrep, visibleTeamBPrep, motion, attendance, scoreStr, ratingsStr, hostName, coJudgeName, speakerNotes, finalNotes,
+		sheets.FormatSheetTime(time.Now()),
 	}
 	h.Sheets.UpsertRowAtColumn(ctx, "Round2", "B", email, row)
 }
