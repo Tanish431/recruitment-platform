@@ -179,7 +179,7 @@ func (h *AuthHandler) upsertUser(ctx context.Context, email, name string) (*mode
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := h.Sheets.UpsertRowAtColumn(ctx, "Sheet1", "B", u.CampusEmail,
-			[]interface{}{u.Name, u.CampusEmail, "", u.Phone, u.WhatsApp}); err != nil {
+			[]interface{}{u.Name, u.CampusEmail, u.BitsID, u.Phone, u.WhatsApp}); err != nil {
 			log.Printf("warning: failed to sync candidate sheet row on login for %s: %v", u.CampusEmail, err)
 		}
 	}

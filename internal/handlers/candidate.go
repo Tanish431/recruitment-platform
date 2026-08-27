@@ -373,8 +373,8 @@ func (h *CandidateHandler) UpdateProfile(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if body.Phone == "" || body.WhatsApp == "" {
-		http.Error(w, "phone and whatsapp are both required", http.StatusBadRequest)
+	if body.Phone == "" || body.WhatsApp == "" || body.BitsID == "" {
+		http.Error(w, "phone, whatsapp and BITS ID are both required", http.StatusBadRequest)
 		return
 	}
 	body.BitsID = strings.ToUpper(strings.TrimSpace(body.BitsID))
