@@ -820,7 +820,7 @@ func (h *AdminHandler) ListUnavailability(w http.ResponseWriter, r *http.Request
 	results := []view{}
 	for rows.Next() {
 		var v view
-		if err := rows.Scan(&v.CandidateName, &v.CandidateBitsID, &v.CandidateEmail, &v.Dates, &v.Note, &v.SubmittedAt, &v.Reason); err != nil {
+		if err := rows.Scan(&v.CandidateName, &v.CandidateBitsID, &v.CandidateEmail, &v.Dates, &v.Note, &v.Reason, &v.SubmittedAt); err != nil {
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
 		}
